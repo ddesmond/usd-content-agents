@@ -23,6 +23,7 @@ from material_agent.materials import (
     material_entries_with_fallback,
     material_mapping_with_fallback,
 )
+from material_agent.material_profiles import normalize_material_profile
 from material_agent.prompt_security import format_material_names_for_prompt
 from material_agent.tasks.config_loader import load_config_from_context
 from material_agent.tasks.prepare_dataset import (
@@ -163,8 +164,32 @@ class PipelineConfigTask(Task):
         context["step_configs"] = step_configs
         context["materials_data"] = materials_data  # Store for use by steps
         context["keep_temp_files"] = keep_temp_files
+        context["material_profile"] = self._material_profile_from_config(config)
 
         return context
+
+    @staticmethod
+    def _material_profile_from_config(config: dict[str, Any]) -> str:
+        """Return the requested material authoring profile from the output section.
+
+        The unified pipeline previously dropped this value, so the apply step
+        always fell back to ``auto`` and silently authored whatever the material
+        library happened to provide. Accept the same aliases the legacy apply
+        config path accepts.
+        """
+        output = config.get("output") or {}
+        if not isinstance(output, dict):
+            return "auto"
+        for key in ("material_profile", "shader_target", "material_authoring_target"):
+            value = output.get(key)
+            if value is None or value == "":
+                continue
+            if not isinstance(value, str):
+                raise ValueError(
+                    f"output.{key} must be a string, got {type(value).__name__}"
+                )
+            return normalize_material_profile(value)
+        return "auto"
 
     def _parse_materials(
         self, config: dict[str, Any], config_path: Path

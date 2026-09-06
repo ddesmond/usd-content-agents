@@ -29,6 +29,7 @@ from material_agent.api.defaults import (
     DEFAULT_USD_PRIM_WARNING_THRESHOLD,
 )
 from material_agent.config.schema import STEP_ORDER
+from material_agent.material_profiles import normalize_material_profile
 from material_agent.simready import is_simready_library_id
 from sse_starlette import EventSourceResponse
 from world_understanding.utils.archive import (
@@ -1248,6 +1249,16 @@ def _parse_bool_form(value: str | None) -> bool:
     if value is None:
         return False
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_material_profile(value: object) -> str:
+    """Validate the requested material authoring profile."""
+    if value is None or value == "":
+        return "auto"
+    try:
+        return normalize_material_profile(value if isinstance(value, str) else str(value))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _parse_coverage_policy(value: object) -> CoveragePolicy:
@@ -3725,6 +3736,15 @@ async def create_pipeline(
             "allow_partial preserves artifacts with explicit partial readiness."
         ),
     ),
+    material_profile: str = Form(
+        default="auto",
+        description=(
+            "Material authoring profile for the applied materials: auto, "
+            "display_color, preview_surface, openpbr_materialx, or omnipbr_mdl. "
+            "Anything other than auto fails closed when the selected material "
+            "library cannot satisfy it."
+        ),
+    ),
     optimize_usd: str = Form(
         default="true",
         description="Enable USD optimization step (true/false, default: true)",
@@ -3993,6 +4013,7 @@ async def create_pipeline(
     if steps:
         steps_list = [s.strip() for s in steps.split(",") if s.strip()]
     coverage_policy_value = _parse_coverage_policy(coverage_policy)
+    material_profile_value = _parse_material_profile(material_profile)
 
     # Use default user prompt if not provided
     user_prompt_text = user_prompt.strip() if user_prompt else None
@@ -4083,6 +4104,7 @@ async def create_pipeline(
         "render_num_workers": render_num_workers,
         "steps": steps_list,
         "coverage_policy": coverage_policy_value,
+        "material_profile": material_profile_value,
         "generated_reference_id": generated_reference_id or None,
         "enable_material_generation": material_generation_enabled,
         "material_generation_guidance": material_generation_guidance or None,
@@ -4678,6 +4700,12 @@ async def create_pipeline(
         user_prompt=user_prompt_text,
         enabled_steps=pipeline_steps,
         working_dir=str(session_dir / "cache"),
+    )
+    # The apply step reads this from the unified output section. Without it the
+    # requested profile is dropped and materials are authored as whatever the
+    # library happens to provide.
+    pipeline_config.setdefault("output", {})["material_profile"] = (
+        material_profile_value
     )
     if selected_lib and is_simready_library_id(selected_lib.id):
         pipeline_config["materials"]["simready"] = {
