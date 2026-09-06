@@ -56,7 +56,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - material-session-storage:/var/material-agent/sessions
+      # Session artifacts: uploaded stages, renders and output USD. Defaults to a
+      # named volume to preserve upstream behaviour; set COLLECTION_MATERIAL_SESSIONS_SOURCE
+      # to a host path so real work survives volume pruning and rebuilds.
+      - ${COLLECTION_MATERIAL_SESSIONS_SOURCE:-material-session-storage}:/var/material-agent/sessions
       # Defaults to a named volume. deploy.py sets this to a host directory
       # when simready.cache_dir is configured, turning it into a bind mount so
       # pre-staged SimReady release archives survive redeploys.
@@ -114,7 +117,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - physics-session-storage:/var/physics-agent/sessions
+      # Session artifacts: uploaded stages, renders and output USD. Defaults to a
+      # named volume to preserve upstream behaviour; set COLLECTION_PHYSICS_SESSIONS_SOURCE
+      # to a host path so real work survives volume pruning and rebuilds.
+      - ${COLLECTION_PHYSICS_SESSIONS_SOURCE:-physics-session-storage}:/var/physics-agent/sessions
     restart: unless-stopped
     logging:
       driver: json-file
@@ -170,7 +176,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - texture-session-storage:/var/texture-agent/sessions
+      # Session artifacts: uploaded stages, renders and output USD. Defaults to a
+      # named volume to preserve upstream behaviour; set COLLECTION_TEXTURE_SESSIONS_SOURCE
+      # to a host path so real work survives volume pruning and rebuilds.
+      - ${COLLECTION_TEXTURE_SESSIONS_SOURCE:-texture-session-storage}:/var/texture-agent/sessions
     restart: unless-stopped
     logging:
       driver: json-file

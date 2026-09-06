@@ -386,7 +386,31 @@ def build_env(config: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
         env.update(simready_env)
         errors.extend(simready_errors)
 
+    env.update(build_session_storage_env(config))
+
     return env, errors
+
+
+def build_session_storage_env(config: dict[str, Any]) -> dict[str, str]:
+    """Map agent session storage onto host paths when the spec names them.
+
+    Session artifacts are real work: uploaded stages, renders and output USD.
+    Left in a named volume they sit in disposable storage, one `docker volume
+    prune` from gone. When `storage.sessions_dir` is set, each agent gets a
+    bind mount under it instead.
+    """
+    storage = config.get("storage") or {}
+    if not isinstance(storage, dict):
+        return {}
+    base = str(storage.get("sessions_dir") or "").strip()
+    if not base:
+        return {}
+    base = base.rstrip("/")
+    return {
+        "COLLECTION_MATERIAL_SESSIONS_SOURCE": f"{base}/material-sessions",
+        "COLLECTION_PHYSICS_SESSIONS_SOURCE": f"{base}/physics-sessions",
+        "COLLECTION_TEXTURE_SESSIONS_SOURCE": f"{base}/texture-sessions",
+    }
 
 
 def build_simready_env(config: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
