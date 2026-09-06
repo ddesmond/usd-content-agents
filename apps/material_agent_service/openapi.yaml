@@ -423,6 +423,36 @@ paths:
         "404": { description: Session not found }
         "422": { description: Invalid request body }
 
+  /pipeline/{session_id}/variants:
+    post:
+      summary: Produce several material treatments of one asset
+      description: >
+        Replays the session's cached dataset once per variant with its own
+        prompt, material library, and authoring profile. Variants run serially
+        and each result is snapshotted before the next run overwrites it.
+      operationId: createMaterialVariants
+      tags: [pipeline]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VariantsRequest" }
+      responses:
+        "202":
+          description: Variant run queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VariantRunAccepted" }
+        "400": { description: Session is not variant-capable or a spec is invalid }
+        "404": { description: Session not found }
+        "409": { description: A pipeline job or variant run already owns the session }
+        "422": { description: Invalid request body }
+
   /pipeline/{session_id}/event-log:
     get:
       summary: Get persisted pipeline event history
@@ -486,6 +516,100 @@ paths:
             image/png:
               schema: { type: string, format: binary }
         "404": { description: Render not available }
+
+  /artifacts/{session_id}/variants:
+    get:
+      summary: List stored material variants
+      description: >
+        Returns every stored variant with its label, originating spec, outcome,
+        and URLs for its preview image and USD, so a grid can be rendered
+        without a follow-up request per variant.
+      operationId: listMaterialVariants
+      tags: [artifacts]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Stored variants and the most recent run progress
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VariantList" }
+        "404": { description: Session not found }
+
+  /artifacts/{session_id}/variants/{variant_id}/preview:
+    get:
+      summary: Download one variant preview render
+      operationId: downloadVariantPreview
+      tags: [artifacts]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: variant_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: PNG render of the asset with this variant applied
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        "400": { description: Invalid variant identifier }
+        "404": { description: Variant or preview not available }
+
+  /artifacts/{session_id}/variants/{variant_id}/output:
+    get:
+      summary: Download one variant USD
+      description: >
+        Returns the flattened stage for full-stage variants and the material
+        binding layer for layer_only variants.
+      operationId: downloadVariantOutput
+      tags: [artifacts]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: variant_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Variant USD file
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400": { description: Invalid variant identifier }
+        "404": { description: Variant or USD not available }
+
+  /artifacts/{session_id}/variants/{variant_id}/predictions:
+    get:
+      summary: Download one variant's predictions JSONL
+      operationId: downloadVariantPredictions
+      tags: [artifacts]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: variant_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Variant predictions JSONL file
+          content:
+            application/x-ndjson:
+              schema: { type: string }
+        "400": { description: Invalid variant identifier }
+        "404": { description: Variant or predictions not available }
 
   /artifacts/{session_id}/predictions:
     get:
@@ -1010,6 +1134,159 @@ components:
           enum: [strict, allow_partial]
           nullable: true
           description: Optional coverage policy override for this regeneration
+        material_library:
+          type: string
+          nullable: true
+          description: Optional material library ID override for this regeneration
+        material_profile:
+          type: string
+          nullable: true
+          enum: [auto, display_color, preview_surface, openpbr_materialx, omnipbr_mdl]
+          description: Optional material authoring profile override
+
+    MaterialVariantSpec:
+      type: object
+      required: [label]
+      properties:
+        label:
+          type: string
+          description: Human-readable name shown next to the variant preview
+        user_prompt:
+          type: string
+          nullable: true
+          description: Guidance handed to the VLM for this variant only
+        material_library:
+          type: string
+          nullable: true
+          description: Material library ID for this variant
+        material_profile:
+          type: string
+          nullable: true
+          enum: [auto, display_color, preview_surface, openpbr_materialx, omnipbr_mdl]
+          description: Material authoring profile for this variant
+        layer_only:
+          type: boolean
+          default: false
+          description: Store the variant as a USD material binding layer
+        coverage_policy:
+          type: string
+          enum: [strict, allow_partial]
+          nullable: true
+        steps:
+          type: array
+          nullable: true
+          items: { $ref: "#/components/schemas/PipelineStep" }
+
+    VariantsRequest:
+      type: object
+      required: [variants]
+      properties:
+        variants:
+          type: array
+          minItems: 1
+          maxItems: 8
+          description: Variant specifications, executed serially in order
+          items: { $ref: "#/components/schemas/MaterialVariantSpec" }
+        steps:
+          type: array
+          description: >
+            Steps replayed from cache for every variant. Cached multi-view
+            renders are reused; dataset preparation is included by default
+            because that is the step a variant's user_prompt reaches.
+          default: [build_dataset_prepare_dataset, predict, apply, render]
+          items: { $ref: "#/components/schemas/PipelineStep" }
+        reset:
+          type: boolean
+          default: false
+          description: Discard previously stored variants before running
+
+    VariantRunAccepted:
+      type: object
+      properties:
+        session_id: { type: string }
+        run_id: { type: string }
+        status: { type: string, example: pending }
+        total: { type: integer }
+        variant_ids:
+          type: array
+          items: { type: string }
+        message: { type: string }
+
+    VariantRunProgress:
+      type: object
+      properties:
+        run_id: { type: string }
+        status:
+          type: string
+          enum: [running, completed, failed, cancelled]
+        total: { type: integer }
+        completed_count: { type: integer }
+        failed_count: { type: integer }
+        current_index: { type: integer, nullable: true }
+        current_variant_id: { type: string, nullable: true }
+        current_label: { type: string, nullable: true }
+        started_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time, nullable: true }
+        error: { type: string, nullable: true }
+
+    MaterialVariantOutcome:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pending, running, completed, failed, cancelled]
+        error:
+          type: string
+          nullable: true
+          description: Why this variant failed, empty only when it succeeded
+        error_diagnostic:
+          type: object
+          nullable: true
+          description: Durable diagnostic record persisted by the failing run
+        failed_step: { type: string, nullable: true }
+        duration_seconds: { type: number, nullable: true }
+        coverage:
+          allOf: [{ $ref: "#/components/schemas/MaterialCoverage" }]
+          nullable: true
+        readiness_grade: { type: string, nullable: true }
+        stats: { type: object }
+        material_library: { type: string, nullable: true }
+        material_profile: { type: string, nullable: true }
+        layer_only: { type: boolean }
+
+    MaterialVariant:
+      type: object
+      properties:
+        variant_id: { type: string }
+        run_id: { type: string }
+        index: { type: integer }
+        label: { type: string }
+        status:
+          type: string
+          enum: [pending, running, completed, failed, cancelled]
+        spec: { $ref: "#/components/schemas/MaterialVariantSpec" }
+        outcome: { $ref: "#/components/schemas/MaterialVariantOutcome" }
+        preview_url:
+          type: string
+          nullable: true
+          description: URL of the rendered preview for this variant
+        usd_url: { type: string, nullable: true }
+        predictions_url: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time, nullable: true }
+        completed_at: { type: string, format: date-time, nullable: true }
+
+    VariantList:
+      type: object
+      properties:
+        session_id: { type: string }
+        run:
+          allOf: [{ $ref: "#/components/schemas/VariantRunProgress" }]
+          nullable: true
+        variants:
+          type: array
+          items: { $ref: "#/components/schemas/MaterialVariant" }
+        total: { type: integer }
 
     SessionCreated:
       type: object
@@ -1070,6 +1347,11 @@ components:
           oneOf:
             - { $ref: "#/components/schemas/MaterialCoverage" }
             - { type: "null" }
+        variant_run:
+          oneOf:
+            - { $ref: "#/components/schemas/VariantRunProgress" }
+            - { type: "null" }
+          description: Progress of the material variant run that owns this session
 
     PipelineResults:
       type: object

@@ -22,6 +22,7 @@ from material_agent.api import (
     arun_pipeline,
     arun_scene_pipeline,
 )
+from material_agent.config.schema import STEP_ORDER
 from world_understanding.agentic.config import clone_config_containers
 from world_understanding.telemetry import get_current_span, traced
 from world_understanding.telemetry.attributes import MAAttributes
@@ -70,6 +71,71 @@ _STEP_DISPLAY_NAMES = {
     "apply": "Applying Materials",
     "render": "Rendering Final Output",
 }
+
+
+def _checkpoint_completed_steps(session_dir: Path) -> list[str]:
+    """Return the checkpoint's surviving completed steps, if any."""
+    state_path = session_dir / "cache" / ".pipeline_state.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return []
+    completed = state.get("completed_steps") if isinstance(state, dict) else None
+    return (
+        [step for step in completed if isinstance(step, str)]
+        if (isinstance(completed, list))
+        else []
+    )
+
+
+def _restore_carried_checkpoint_steps(
+    session_dir: Path,
+    carried_steps: list[str],
+) -> None:
+    """Re-record still-valid upstream completions in the run's checkpoint.
+
+    A regeneration executes only its requested steps, and the pipeline rewrites
+    the checkpoint with just those steps.  The surviving upstream evidence was
+    already pruned to what remains valid before the run started, so losing it
+    here would make every later regeneration of the same session fail its
+    dependency closure ("no current cached evidence was found").
+    """
+    if not carried_steps:
+        return
+    state_path = session_dir / "cache" / ".pipeline_state.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return
+    if not isinstance(state, dict):
+        return
+    completed = state.get("completed_steps")
+    completed = (
+        [step for step in completed if isinstance(step, str)]
+        if (isinstance(completed, list))
+        else []
+    )
+    failed = state.get("failed_steps")
+    failed_steps = set(failed) if isinstance(failed, list) else set()
+    merged = set(completed) | {
+        step for step in carried_steps if step not in failed_steps
+    }
+    if merged == set(completed):
+        return
+    ordered = [step for step in STEP_ORDER if step in merged]
+    ordered.extend(sorted(step for step in merged if step not in STEP_ORDER))
+    state["completed_steps"] = ordered
+    pending_path = state_path.with_name(".pipeline_state.carry-forward.json")
+    try:
+        pending_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        pending_path.replace(state_path)
+    except OSError:
+        log_durable_failure(
+            logger,
+            "regeneration_checkpoint_carry_forward_failed",
+            phase=FailurePhase.LOCAL_PUBLICATION,
+            retryable=False,
+        )
 
 
 def _current_run_completed_steps(
@@ -303,6 +369,12 @@ async def _carry_forward_regeneration_artifacts(
         if (
             "build_dataset_prepare_dataset" in configured_steps
             and logical_key.startswith("cache/dataset/")
+            # Dataset preparation re-emits the dataset records, but the
+            # rendered dataset views under cache/dataset/usd/ belong to
+            # build_dataset_usd. Dropping them here would leave the next
+            # regeneration with no reusable render evidence, and hydration
+            # would then delete the local copies as well.
+            and not logical_key.startswith("cache/dataset/usd/")
         ):
             continue
         if "generate_material_library" in configured_steps and logical_key.startswith(
@@ -1235,6 +1307,11 @@ async def _execute_pipeline_inner(
 
     # Call async API directly - no wrapper or thread pool needed!
     baseline_signatures = _capture_promotable_file_signatures(session_dir)
+    carried_checkpoint_steps = (
+        _checkpoint_completed_steps(session_dir)
+        if regeneration_claim is not None
+        else []
+    )
     result = await arun_pipeline(
         PipelineInput(
             config=config_dict,
@@ -1242,6 +1319,8 @@ async def _execute_pipeline_inner(
             verbose=False,
         )
     )
+    if regeneration_claim is not None:
+        _restore_carried_checkpoint_steps(session_dir, carried_checkpoint_steps)
     executed_completed_steps = _current_run_completed_steps(
         config_dict,
         result.completed_steps,

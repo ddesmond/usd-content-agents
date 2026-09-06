@@ -77,6 +77,94 @@ class MaterialCoverage(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class VariantRunProgress(BaseModel):
+    """Progress of a serial material variant run."""
+
+    run_id: str
+    status: Literal["running", "completed", "failed", "cancelled"]
+    total: int = Field(description="Variants requested in this run")
+    completed_count: int = Field(default=0, description="Variants that succeeded")
+    failed_count: int = Field(default=0, description="Variants that failed")
+    current_index: int | None = Field(
+        default=None, description="Zero-based index of the executing variant"
+    )
+    current_variant_id: str | None = Field(default=None)
+    current_label: str | None = Field(
+        default=None, description="Label of the executing variant"
+    )
+    started_at: str
+    completed_at: str | None = None
+    error: str | None = None
+
+
+class MaterialVariantOutcome(BaseModel):
+    """What one variant produced, including partial or failed results."""
+
+    status: Literal["pending", "running", "completed", "failed", "cancelled"]
+    error: str | None = Field(
+        default=None,
+        description="Why this variant failed, empty only when it succeeded",
+    )
+    error_diagnostic: dict[str, Any] | None = Field(
+        default=None,
+        description="Durable diagnostic record persisted by the failing run",
+    )
+    failed_step: str | None = None
+    duration_seconds: float | None = None
+    coverage: MaterialCoverage | None = None
+    readiness_grade: str | None = None
+    stats: dict[str, Any] = Field(default_factory=dict)
+    material_library: str | None = None
+    material_profile: str | None = None
+    layer_only: bool = False
+
+
+class MaterialVariant(BaseModel):
+    """One stored material treatment with its preview and USD URLs."""
+
+    variant_id: str
+    run_id: str
+    index: int = Field(description="Zero-based position within its run")
+    label: str
+    status: Literal["pending", "running", "completed", "failed", "cancelled"]
+    spec: dict[str, Any] = Field(
+        default_factory=dict, description="The variant spec that produced this result"
+    )
+    outcome: MaterialVariantOutcome
+    preview_url: str | None = Field(
+        default=None, description="Rendered preview of the asset with this treatment"
+    )
+    usd_url: str | None = Field(
+        default=None, description="Snapshotted output USD or material binding layer"
+    )
+    predictions_url: str | None = None
+    created_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+
+
+class VariantList(BaseModel):
+    """Every stored variant for a session, newest run last."""
+
+    session_id: str
+    run: VariantRunProgress | None = Field(
+        default=None, description="The most recent variant run"
+    )
+    variants: list[MaterialVariant] = Field(default_factory=list)
+    total: int = Field(description="Number of stored variants")
+
+
+class VariantRunAccepted(BaseModel):
+    """Response when a variant run is queued."""
+
+    session_id: str
+    run_id: str
+    status: str = "pending"
+    total: int = Field(description="Variants queued")
+    variant_ids: list[str] = Field(default_factory=list)
+    message: str = "Variant run queued for execution"
+
+
 class PipelineStatus(BaseModel):
     """Enhanced pipeline execution status with progress."""
 
@@ -96,6 +184,13 @@ class PipelineStatus(BaseModel):
     updated_at: str = Field(description="ISO timestamp of last update")
     coverage: MaterialCoverage | None = Field(
         default=None, description="Material prediction and binding readiness"
+    )
+    variant_run: VariantRunProgress | None = Field(
+        default=None,
+        description=(
+            "Progress of the material variant run that owns this session, "
+            "including which variant is currently executing"
+        ),
     )
 
 

@@ -89,3 +89,88 @@ class RegenerateRequest(BaseModel):
             "completed result with explicit partial readiness."
         ),
     )
+    material_library: str | None = Field(
+        default=None,
+        description=(
+            "Material library ID to predict and apply against. None keeps the "
+            "library the session already resolved. Ignored when the session has "
+            "custom uploaded materials."
+        ),
+        examples=["simready-category:Metal"],
+    )
+    material_profile: str | None = Field(
+        default=None,
+        description=(
+            "Material authoring profile override: auto, display_color, "
+            "preview_surface, openpbr_materialx, or omnipbr_mdl. None keeps the "
+            "profile resolution the pipeline defaults to."
+        ),
+    )
+
+
+class MaterialVariantSpec(BaseModel):
+    """One material treatment to produce for an already-processed asset."""
+
+    label: str = Field(
+        min_length=1,
+        max_length=120,
+        description="Human-readable name shown next to the variant preview",
+        examples=["Weathered steel"],
+    )
+    user_prompt: str | None = Field(
+        default=None,
+        description="Guidance handed to the VLM for this variant only",
+        examples=["Treat every part as heavily weathered, rusted steel."],
+    )
+    material_library: str | None = Field(
+        default=None,
+        description="Material library ID for this variant (default: session library)",
+        examples=["simready-category:Plastic"],
+    )
+    material_profile: str | None = Field(
+        default=None,
+        description="Material authoring profile for this variant",
+        examples=["omnipbr_mdl"],
+    )
+    layer_only: bool = Field(
+        default=False,
+        description=(
+            "Store this variant as a USD material binding layer over the "
+            "original geometry instead of a full stage."
+        ),
+    )
+    coverage_policy: Literal["strict", "allow_partial"] | None = Field(
+        default=None,
+        description="Coverage policy for this variant (default: session policy)",
+    )
+    steps: list[PipelineStep] | None = Field(
+        default=None,
+        description="Per-variant step override (default: the request-level steps)",
+    )
+
+
+class VariantsRequest(BaseModel):
+    """Request to produce several material treatments of one session asset."""
+
+    variants: list[MaterialVariantSpec] = Field(
+        min_length=1,
+        max_length=8,
+        description="Variant specifications, executed serially in order",
+    )
+    steps: list[PipelineStep] = Field(
+        default=[
+            PipelineStep.BUILD_DATASET_PREPARE_DATASET,
+            PipelineStep.PREDICT,
+            PipelineStep.APPLY,
+            PipelineStep.RENDER,
+        ],
+        description=(
+            "Steps replayed from cache for every variant. The cached multi-view "
+            "renders are reused; dataset preparation is included by default "
+            "because that is the step a variant's user_prompt reaches."
+        ),
+    )
+    reset: bool = Field(
+        default=False,
+        description="Discard previously stored variants before running",
+    )

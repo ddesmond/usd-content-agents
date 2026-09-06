@@ -60,6 +60,7 @@ from world_understanding.utils.durable_diagnostics import (
 from world_understanding.utils.held_file_response import HeldFileResponse
 from world_understanding.utils.usd.stage import get_stage_info_from_path
 
+from .. import variants as variants_module
 from ..artifact_lineage import (
     ARTIFACT_CANONICAL_KEYS,
     ARTIFACT_LINEAGE,
@@ -74,12 +75,13 @@ from ..coverage import (
     normalize_coverage_policy,
     normalize_legacy_completed_coverage,
 )
-from ..models.requests import RegenerateRequest
+from ..models.requests import RegenerateRequest, VariantsRequest
 from ..models.responses import (
     PipelineError,
     PipelineResults,
     PipelineStatus,
     SessionCreated,
+    VariantRunAccepted,
 )
 from ..runtime import DuplicateJobError, get_event_bus, get_job_registry
 from ..runtime.events import ProgressEvent, StepState
@@ -5188,6 +5190,10 @@ async def get_pipeline_status(session_id: str) -> PipelineStatus:
         created_at=metadata["created_at"],
         updated_at=metadata["updated_at"],
         coverage=metadata.get("coverage"),
+        variant_run=(
+            variants_module.active_variant_run(session_id)
+            or variants_module.variants_block(metadata)["run"]
+        ),
     )
 
 
@@ -5802,6 +5808,18 @@ async def regenerate_pipeline(
     )
     original_config["coverage_policy"] = coverage_policy_value
 
+    # Library and profile overrides are applied only when the caller asks for
+    # them, so an unqualified regeneration keeps its historical behaviour.
+    if request.material_library is not None:
+        original_config["material_library"] = request.material_library
+    material_profile_override = (
+        _parse_material_profile(request.material_profile)
+        if request.material_profile is not None
+        else None
+    )
+    if material_profile_override is not None:
+        original_config["material_profile"] = material_profile_override
+
     # Reject the prompt-overlaid durable config before planning can lead to a
     # claim, hydration, checkpoint rewrite, or metadata update.
     await _validate_request_owned_durable_content(
@@ -5878,6 +5896,7 @@ async def regenerate_pipeline(
     # Check if session has custom materials from previous run
     session_materials_library = config.materials_library_path
     session_materials_entries = config.materials
+    selected_lib = None
 
     if input_bundle.custom_materials is not None:
         session_materials_library, session_materials_entries = (
@@ -5885,6 +5904,23 @@ async def regenerate_pipeline(
         )
         logger.info(
             "Regeneration using %d cached custom materials",
+            len(session_materials_entries),
+        )
+    elif request.material_library is not None:
+        try:
+            selected_lib = config.resolve_material_library(request.material_library)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if selected_lib is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown material library: {request.material_library}",
+            )
+        session_materials_library = selected_lib.library_path
+        session_materials_entries = selected_lib.entries
+        logger.info(
+            "Regeneration using material library '%s' (%d entries)",
+            selected_lib.id,
             len(session_materials_entries),
         )
 
@@ -5916,6 +5952,20 @@ async def regenerate_pipeline(
         enabled_steps=steps_to_run,
         working_dir=str(session_dir / "cache"),
     )
+    if material_profile_override is not None:
+        # The apply step reads the requested profile from the unified output
+        # section; without it the override would be silently dropped.
+        pipeline_config.setdefault("output", {})["material_profile"] = (
+            material_profile_override
+        )
+    if selected_lib is not None and is_simready_library_id(selected_lib.id):
+        pipeline_config["materials"]["simready"] = {
+            "library_id": selected_lib.id,
+            "release_tag": config.simready_release_tag,
+            "manifest_path": config.simready_manifest_path,
+            "cache_dir": config.simready_cache_dir,
+            "split_archives_enabled": config.simready_split_archives_enabled,
+        }
 
     if regenerate_clustering:
         pipeline_config["steps"]["cluster_prims"] = _build_cluster_prims_step_config(
@@ -6337,6 +6387,163 @@ async def regenerate_pipeline(
         session_id=session_id,
         status="pending",
         message=f"Regenerating steps: {', '.join(s.value for s in request.steps)}",
+    )
+
+
+@router.post(
+    "/{session_id}/variants",
+    response_model=VariantRunAccepted,
+    status_code=202,
+)
+async def create_material_variants(
+    session_id: str,
+    request: VariantsRequest,
+) -> VariantRunAccepted:
+    """Produce several material treatments of one already-processed asset.
+
+    Every variant replays the session's cached dataset through the regeneration
+    machinery with its own prompt, material library, and authoring profile, then
+    the result is snapshotted under ``variants/<variant_id>/`` before the next
+    variant overwrites the mutable session output.  Variants run serially and
+    the response returns immediately; poll ``/pipeline/{session_id}/status`` for
+    the running variant and ``/artifacts/{session_id}/variants`` for results.
+
+    Args:
+        session_id: Session identifier
+        request: Variant specifications and the steps replayed for each
+
+    Returns:
+        The queued run with its per-variant identifiers
+    """
+    manager = get_session_manager()
+
+    metadata = await manager.get_session_metadata(session_id)
+    if not metadata:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    stored_config = metadata.get("config")
+    configured_large_scene = (
+        isinstance(stored_config, dict) and stored_config.get("large_scene") is True
+    )
+    if metadata.get("pipeline_type") == "large_scene" or configured_large_scene:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Material variants build on single-asset regeneration and are "
+                "not supported for large-scene sessions."
+            ),
+        )
+
+    if variants_module.variant_run_is_active(session_id):
+        raise HTTPException(
+            status_code=409,
+            detail="A material variant run is already in progress for this session",
+        )
+    if get_job_registry().is_running(session_id):
+        raise HTTPException(
+            status_code=409,
+            detail="A pipeline job is already reserved or running for this session",
+        )
+    if metadata.get("status") not in {"completed", "failed", "cancelled"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot build variants while pipeline is {metadata.get('status')}",
+        )
+    if not _terminal_metadata_ready(metadata):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Pipeline terminal status is still being finalized; retry after "
+                "authoritative results are available"
+            ),
+        )
+
+    await _validate_request_owned_durable_content(
+        {"variants": [spec.model_dump() for spec in request.variants]}
+    )
+
+    run_id = uuid.uuid4().hex[:12]
+    planned: list[dict[str, Any]] = []
+    for index, spec in enumerate(request.variants):
+        steps = [step.value for step in (spec.steps or request.steps)]
+        if spec.user_prompt and "build_dataset_prepare_dataset" not in steps:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Variant '{spec.label}': user_prompt only reaches the "
+                    "build_dataset_prepare_dataset step, so it must be included "
+                    "in the variant steps."
+                ),
+            )
+        if spec.layer_only and "apply" not in steps:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Variant '{spec.label}': layer_only=true requires the "
+                    "apply step."
+                ),
+            )
+        if spec.material_library is not None:
+            try:
+                resolved_library = config.resolve_material_library(
+                    spec.material_library
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if resolved_library is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Variant '{spec.label}': unknown material library "
+                        f"'{spec.material_library}'"
+                    ),
+                )
+        planned.append(
+            variants_module.plan_variant_entry(
+                run_id=run_id,
+                index=index,
+                spec={
+                    "label": spec.label,
+                    "user_prompt": spec.user_prompt,
+                    "material_library": spec.material_library,
+                    "material_profile": (
+                        _parse_material_profile(spec.material_profile)
+                        if spec.material_profile is not None
+                        else None
+                    ),
+                    "layer_only": spec.layer_only,
+                    "coverage_policy": spec.coverage_policy,
+                    "steps": steps,
+                },
+            )
+        )
+
+    if request.reset:
+        await variants_module.discard_variants(manager, session_id)
+        await variants_module.persist_block(
+            manager,
+            session_id,
+            {"run": None, "variants": []},
+        )
+
+    task = asyncio.create_task(
+        variants_module.execute_variant_run(manager, session_id, run_id, planned)
+    )
+    variants_module.register_variant_run(session_id, task)
+
+    logger.info(
+        "Queued %d material variants for session %s (run %s)",
+        len(planned),
+        session_id[:8],
+        run_id,
+    )
+    return VariantRunAccepted(
+        session_id=session_id,
+        run_id=run_id,
+        status="pending",
+        total=len(planned),
+        variant_ids=[entry["variant_id"] for entry in planned],
+        message=f"Queued {len(planned)} material variant(s) for serial execution",
     )
 
 

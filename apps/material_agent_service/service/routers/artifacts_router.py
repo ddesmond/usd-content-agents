@@ -18,13 +18,20 @@ from fastapi.responses import (
     Response,
     StreamingResponse,
 )
+from pydantic import ValidationError
 from world_understanding.utils.durable_diagnostics import (
     FailurePhase,
     log_durable_failure,
 )
 from world_understanding.utils.held_file_response import HeldFileResponse
 
+from .. import variants as variants_module
 from ..artifact_lineage import artifact_is_valid
+from ..models.responses import (
+    MaterialVariant,
+    MaterialVariantOutcome,
+    VariantList,
+)
 from ..session.manager import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -346,6 +353,214 @@ async def _generate_report_on_demand(
     except BaseException:
         shutil.rmtree(report_dir, ignore_errors=True)
         raise
+
+
+def _variant_outcome_model(raw: Any) -> MaterialVariantOutcome:
+    """Build the outcome model, tolerating legacy or partial coverage records."""
+    payload = dict(raw) if isinstance(raw, dict) else {"status": "failed"}
+    try:
+        return MaterialVariantOutcome.model_validate(payload)
+    except ValidationError:
+        payload["coverage"] = None
+        try:
+            return MaterialVariantOutcome.model_validate(payload)
+        except ValidationError:
+            return MaterialVariantOutcome(
+                status="failed",
+                error="Stored variant outcome could not be decoded",
+            )
+
+
+async def _serve_variant_artifact(
+    session_id: str,
+    variant_id: str,
+    artifact_names: tuple[str, ...],
+    not_found_detail: str,
+    *,
+    layer_aware: bool = False,
+) -> Response | FileResponse | RedirectResponse | StreamingResponse:
+    """Serve one immutable variant snapshot from the store or local disk."""
+    manager = get_session_manager()
+
+    if not variants_module.validate_variant_id(variant_id):
+        raise HTTPException(status_code=400, detail="Invalid variant identifier")
+
+    metadata = await manager.get_session_metadata(session_id)
+    if metadata is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    entry = variants_module.find_variant(metadata, variant_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Variant not found")
+
+    artifacts = entry.get("artifacts")
+    artifacts = artifacts if isinstance(artifacts, dict) else {}
+    spec = entry.get("spec")
+    if layer_aware and isinstance(spec, dict) and spec.get("layer_only"):
+        # A layer-only variant was asked for as a binding layer, so serve the
+        # layer rather than the flattened stage the renderer consumed.
+        artifact_names = tuple(
+            sorted(artifact_names, key=lambda name: name != "output_usd")
+        )
+    key = next(
+        (
+            artifacts[name]
+            for name in artifact_names
+            if isinstance(artifacts.get(name), str)
+        ),
+        None,
+    )
+    if key is None:
+        raise HTTPException(status_code=404, detail=not_found_detail)
+
+    file_name = key.rsplit("/", 1)[-1]
+    media_type = variants_module.variant_media_type(file_name)
+    download_name = f"{variant_id}-{file_name}"
+
+    # Variant snapshots are immutable, so the key never needs run-generation
+    # resolution: it is already scoped to the variant that produced it.
+    if not _requires_sanitizing_proxy(media_type):
+        url = await manager.make_public_url(session_id, key)
+        if url:
+            return RedirectResponse(url, status_code=302)
+
+    stream = await manager.iter_store_chunks(
+        session_id,
+        key,
+        chunk_size=STORE_STREAM_CHUNK_SIZE,
+    )
+    if stream is not None:
+        return StreamingResponse(
+            stream,
+            media_type=media_type,
+            headers={"Content-Disposition": f'inline; filename="{download_name}"'},
+        )
+
+    local_artifact = await manager.open_local_artifact(
+        session_id,
+        manager.get_session_dir(session_id) / key,
+    )
+    if local_artifact is None:
+        raise HTTPException(status_code=404, detail=not_found_detail)
+    return HeldFileResponse(
+        local_artifact,
+        media_type=media_type,
+        filename=download_name,
+    )
+
+
+@router.get("/{session_id}/variants", response_model=VariantList)
+async def list_material_variants(session_id: str) -> VariantList:
+    """List every stored material variant with its preview and USD URLs.
+
+    The response is complete on its own so a browser can lay the variants out
+    as a grid without a follow-up request per variant.  Variants that failed are
+    returned alongside the successful ones with their reason.
+
+    Args:
+        session_id: Session identifier
+
+    Returns:
+        Stored variants and the progress of the most recent variant run
+    """
+    manager = get_session_manager()
+
+    metadata = await manager.get_session_metadata(session_id)
+    if metadata is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    block = variants_module.variants_block(metadata)
+    entries: list[MaterialVariant] = []
+    for entry in block["variants"]:
+        urls = variants_module.variant_urls(session_id, entry)
+        entries.append(
+            MaterialVariant(
+                variant_id=str(entry.get("variant_id", "")),
+                run_id=str(entry.get("run_id", "")),
+                index=int(entry.get("index", 0)),
+                label=str(entry.get("label", "")),
+                status=entry.get("status", "failed"),
+                spec=entry.get("spec") or {},
+                outcome=_variant_outcome_model(entry.get("outcome")),
+                preview_url=urls["preview_url"],
+                usd_url=urls["usd_url"],
+                predictions_url=urls["predictions_url"],
+                created_at=str(entry.get("created_at", "")),
+                started_at=entry.get("started_at"),
+                completed_at=entry.get("completed_at"),
+            )
+        )
+
+    return VariantList(
+        session_id=session_id,
+        run=variants_module.active_variant_run(session_id) or block["run"],
+        variants=entries,
+        total=len(entries),
+    )
+
+
+@router.api_route(
+    "/{session_id}/variants/{variant_id}/preview",
+    methods=["GET", "HEAD"],
+)
+async def get_variant_preview(session_id: str, variant_id: str):
+    """Get the rendered preview of one material variant.
+
+    Args:
+        session_id: Session identifier
+        variant_id: Variant identifier from the variants listing
+
+    Returns:
+        Variant preview PNG image
+    """
+    return await _serve_variant_artifact(
+        session_id,
+        variant_id,
+        ("final_render",),
+        "Variant preview render is not available",
+    )
+
+
+@router.get("/{session_id}/variants/{variant_id}/output")
+async def download_variant_output_usd(session_id: str, variant_id: str):
+    """Download the USD produced for one material variant.
+
+    Returns the flattened stage when the variant was authored as a full stage,
+    and the material binding layer when the variant used ``layer_only``.
+
+    Args:
+        session_id: Session identifier
+        variant_id: Variant identifier from the variants listing
+
+    Returns:
+        Variant USD file as download
+    """
+    return await _serve_variant_artifact(
+        session_id,
+        variant_id,
+        ("output_usd_flat", "output_usd"),
+        "Variant output USD is not available",
+        layer_aware=True,
+    )
+
+
+@router.get("/{session_id}/variants/{variant_id}/predictions")
+async def download_variant_predictions(session_id: str, variant_id: str):
+    """Download the material predictions behind one variant.
+
+    Args:
+        session_id: Session identifier
+        variant_id: Variant identifier from the variants listing
+
+    Returns:
+        Variant predictions JSONL file
+    """
+    return await _serve_variant_artifact(
+        session_id,
+        variant_id,
+        ("restored_predictions", "predictions"),
+        "Variant predictions are not available",
+    )
 
 
 @router.get("/{session_id}/output")

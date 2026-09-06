@@ -553,6 +553,8 @@ class MaterialAgentClient:
         user_prompt: str | None = None,
         layer_only: bool = False,
         coverage_policy: str | None = None,
+        material_library: str | None = None,
+        material_profile: str | None = None,
     ) -> dict:
         """
         Re-run specific pipeline steps from cached session data.
@@ -563,6 +565,8 @@ class MaterialAgentClient:
             user_prompt: Optional prompt override
             layer_only: Output only a material binding layer when re-running apply
             coverage_policy: Optional strict or allow_partial policy override
+            material_library: Optional material library ID override
+            material_profile: Optional material authoring profile override
 
         Returns the response JSON.
         """
@@ -575,7 +579,51 @@ class MaterialAgentClient:
         if coverage_policy is not None:
             _validate_coverage_policy(coverage_policy)
             body["coverage_policy"] = coverage_policy
+        if material_library is not None:
+            body["material_library"] = material_library
+        if material_profile is not None:
+            body["material_profile"] = material_profile
         resp = self._http.post(url, json=body, timeout=self.timeout_seconds)
+        resp.raise_for_status()
+        return resp.json()
+
+    def create_variants(
+        self,
+        session_id: str,
+        variants: list[dict[str, object]],
+        steps: list[str] | None = None,
+        reset: bool = False,
+    ) -> dict:
+        """
+        Queue several material treatments of one already-processed session.
+
+        Each variant re-runs the requested steps from cached session data and
+        its result is snapshotted before the next variant starts. Variants run
+        serially; poll :meth:`get_status` for the running variant and
+        :meth:`get_variants` for the finished ones.
+
+        Args:
+            session_id: Session to build variants for
+            variants: Variant specs, each with at least a ``label``
+            steps: Steps replayed per variant (default: predict, apply, render)
+            reset: Discard previously stored variants first
+
+        Returns the response JSON.
+        """
+        url = f"{self.base_url}/pipeline/{session_id}/variants"
+        body: dict[str, object] = {"variants": variants}
+        if steps is not None:
+            body["steps"] = steps
+        if reset:
+            body["reset"] = True
+        resp = self._http.post(url, json=body, timeout=self.timeout_seconds)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_variants(self, session_id: str) -> dict:
+        """Return stored material variants with preview and USD URLs."""
+        url = f"{self.base_url}/artifacts/{session_id}/variants"
+        resp = self._http.get(url, timeout=self.timeout_seconds)
         resp.raise_for_status()
         return resp.json()
 
