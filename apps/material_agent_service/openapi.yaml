@@ -238,6 +238,15 @@ paths:
                   type: string
                   default: "false"
                   description: Output only a material binding layer instead of a full USD (true/false, default false), preserving the original scene structure
+                material_library:
+                  type: string
+                  default: ""
+                  description: Material library ID to predict and apply against. Blank uses the deployment default (MA_DEFAULT_LIBRARY_ID). Ignored when materials_zip is provided.
+                material_profile:
+                  type: string
+                  enum: [auto, display_color, preview_surface, openpbr_materialx, omnipbr_mdl]
+                  default: auto
+                  description: Material authoring profile for the applied materials. Anything other than auto fails closed when the selected material library cannot satisfy it.
       responses:
         "202":
           description: Pipeline started
@@ -246,6 +255,7 @@ paths:
               schema: { $ref: "#/components/schemas/SessionCreated" }
         "400": { description: Invalid input }
         "413": { description: File too large }
+        "422": { description: Unsupported material_profile }
         "503": { description: Image-generation configuration is required for generated material-library mode }
 
   /pipeline/{session_id}/status:

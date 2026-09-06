@@ -1253,12 +1253,12 @@ def _parse_bool_form(value: str | None) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _parse_material_profile(value: object) -> str:
+def _parse_material_profile(value: str | None) -> str:
     """Validate the requested material authoring profile."""
-    if value is None or value == "":
+    if not value:
         return "auto"
     try:
-        return normalize_material_profile(value if isinstance(value, str) else str(value))
+        return normalize_material_profile(value)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -6485,8 +6485,7 @@ async def create_material_variants(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"Variant '{spec.label}': layer_only=true requires the "
-                    "apply step."
+                    f"Variant '{spec.label}': layer_only=true requires the apply step."
                 ),
             )
         if spec.material_library is not None:

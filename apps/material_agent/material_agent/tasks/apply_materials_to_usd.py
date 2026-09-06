@@ -57,7 +57,9 @@ def _warn_asset_remap(listener: Any | None, message: str) -> None:
         logger.warning(message)
 
 
-def is_module_resolved_source_asset(attr_name: str, path_str: str, source_dir: Path) -> bool:
+def is_module_resolved_source_asset(
+    attr_name: str, path_str: str, source_dir: Path
+) -> bool:
     """Return True for a shader source asset the renderer resolves by name.
 
     ``info:<context>:sourceAsset`` on a UsdShade shader is not necessarily a

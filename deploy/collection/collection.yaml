@@ -92,6 +92,10 @@ simready:
   # in-container downloads (the hydrator has a 300s per-archive timeout).
   enabled: false
   release_tag: v0.2.0
+  # Library a run uses when the caller names none. Optional; omit to keep the
+  # bundled default library. Accepts any library ID, including the SimReady
+  # ones above.
+  # default_library_id: simready-light
   cache_dir: /opt/content-agents-local/simready-cache
   # Omit allowed_categories to expose every non-split category in the manifest.
   allowed_categories:

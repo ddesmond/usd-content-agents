@@ -4375,3 +4375,79 @@ class TestApplyMaterialsHelperCoverage:
         )
         assert materials_applied == {"Steel": "/Materials/Steel", "Empty": ""}
         assert stats["prims_with_materials"] == 1
+
+
+class TestModuleResolvedSourceAssets:
+    """MDL modules resolved by name must survive the asset-path remapper."""
+
+    def test_only_missing_source_assets_are_module_resolved(
+        self, tmp_path: Path
+    ) -> None:
+        source_dir = tmp_path / "library"
+        (source_dir / "textures").mkdir(parents=True)
+        (source_dir / "textures" / "a.png").write_bytes(b"png")
+        (source_dir / "Shipped.mdl").write_bytes(b"mdl")
+
+        # RTX ships OmniPBR.mdl on its MDL search path, so the library has no
+        # such file and the path must be left verbatim.
+        assert apply_module.is_module_resolved_source_asset(
+            "info:mdl:sourceAsset", "OmniPBR.mdl", source_dir
+        )
+        # A library that genuinely ships the module keeps normal remapping.
+        assert not apply_module.is_module_resolved_source_asset(
+            "info:mdl:sourceAsset", "Shipped.mdl", source_dir
+        )
+        # Absolute paths are judged the same way.
+        assert apply_module.is_module_resolved_source_asset(
+            "info:mdl:sourceAsset", str(tmp_path / "absent.mdl"), source_dir
+        )
+        assert not apply_module.is_module_resolved_source_asset(
+            "info:mdl:sourceAsset", str(source_dir / "Shipped.mdl"), source_dir
+        )
+
+        # Everything that is not an info:<context>:sourceAsset is a normal
+        # asset reference and stays remappable.
+        assert not apply_module.is_module_resolved_source_asset(
+            "inputs:file", "textures/missing.png", source_dir
+        )
+        assert not apply_module.is_module_resolved_source_asset(
+            "info:mdl:sourceAssetSubIdentifier", "OmniPBR.mdl", source_dir
+        )
+        assert not apply_module.is_module_resolved_source_asset(
+            "info:mdl:sourceAsset", "", source_dir
+        )
+
+    def test_remap_leaves_module_resolved_source_asset_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        source_dir = tmp_path / "library"
+        target_dir = tmp_path / "output"
+        (source_dir / "textures").mkdir(parents=True)
+        target_dir.mkdir()
+        (source_dir / "textures" / "a.png").write_bytes(b"png")
+
+        layer = Sdf.Layer.CreateAnonymous("materials.usda")
+        prim_spec = Sdf.CreatePrimInLayer(layer, "/Looks/Mat/Shader")
+        prim_spec.specifier = Sdf.SpecifierDef
+        module_attr = Sdf.AttributeSpec(
+            prim_spec,
+            "info:mdl:sourceAsset",
+            Sdf.ValueTypeNames.Asset,
+        )
+        module_attr.default = Sdf.AssetPath("OmniPBR.mdl")
+        texture_attr = Sdf.AttributeSpec(
+            prim_spec,
+            "inputs:diffuse_texture",
+            Sdf.ValueTypeNames.Asset,
+        )
+        texture_attr.default = Sdf.AssetPath("textures/a.png")
+
+        apply_module.remap_asset_paths_in_prim(
+            layer,
+            Sdf.Path("/Looks/Mat/Shader"),
+            source_dir,
+            target_dir,
+        )
+
+        assert module_attr.default.path == "OmniPBR.mdl"
+        assert texture_attr.default.path == "../library/textures/a.png"

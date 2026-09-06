@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 VARIANTS_METADATA_KEY = "material_variants"
 VARIANTS_DIR_NAME = "variants"
-MAX_VARIANTS_PER_RUN = 8
+# The per-run cap lives on the request model, which is where it is enforced.
 MAX_STORED_VARIANTS = 64
 
 _VARIANT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")

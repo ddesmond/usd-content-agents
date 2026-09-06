@@ -108,6 +108,11 @@ class RegenerateRequest(BaseModel):
     )
 
 
+# A variant run is serial, so the cap is about how long one request can hold
+# the session, not about resources.
+MAX_VARIANTS_PER_RUN = 8
+
+
 class MaterialVariantSpec(BaseModel):
     """One material treatment to produce for an already-processed asset."""
 
@@ -154,7 +159,7 @@ class VariantsRequest(BaseModel):
 
     variants: list[MaterialVariantSpec] = Field(
         min_length=1,
-        max_length=8,
+        max_length=MAX_VARIANTS_PER_RUN,
         description="Variant specifications, executed serially in order",
     )
     steps: list[PipelineStep] = Field(

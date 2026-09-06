@@ -19,11 +19,11 @@ from world_understanding.utils.credentials import (
 )
 
 from material_agent.api.defaults import PIPELINE_STEP_NAMES
+from material_agent.material_profiles import normalize_material_profile
 from material_agent.materials import (
     material_entries_with_fallback,
     material_mapping_with_fallback,
 )
-from material_agent.material_profiles import normalize_material_profile
 from material_agent.prompt_security import format_material_names_for_prompt
 from material_agent.tasks.config_loader import load_config_from_context
 from material_agent.tasks.prepare_dataset import (

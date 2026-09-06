@@ -447,9 +447,7 @@ def build_simready_env(config: dict[str, Any]) -> tuple[dict[str, str], list[str
     if values:
         env["MA_SIMREADY_ALLOWED_CATEGORIES"] = ",".join(values)
 
-    if is_enabled(simready.get("split_archives", {}), False) or bool(
-        simready.get("split_archives_enabled", False)
-    ):
+    if bool(simready.get("split_archives_enabled", False)):
         env["MA_SIMREADY_SPLIT_ARCHIVES_ENABLED"] = "true"
 
     return env, errors

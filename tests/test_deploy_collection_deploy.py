@@ -882,3 +882,94 @@ def test_collection_nim_compose_limits_runtime_secrets() -> None:
         assert "env_file" not in service, filename
         assert "NGC_API_KEY=${NGC_API_KEY:-}" in service["environment"], filename
         assert "HF_TOKEN=${HF_TOKEN:-}" in service["environment"], filename
+
+
+def _simready_config(simready: dict[str, object]) -> dict[str, object]:
+    return {
+        "agents": {
+            "material": {"enabled": True, "host_port": 8100},
+            "physics": {"enabled": False},
+            "texture": {"enabled": False},
+        },
+        "dependencies": {
+            "render": {
+                "enabled": True,
+                "provider": "external",
+                "endpoint": "http://render.example:8001",
+            },
+        },
+        "simready": simready,
+    }
+
+
+def test_collection_simready_disabled_emits_nothing() -> None:
+    deploy = load_deploy_module()
+
+    env, errors = deploy.build_simready_env(_simready_config({"enabled": False}))
+
+    assert errors == []
+    assert env == {}
+    # An absent block must behave the same as an explicitly disabled one.
+    assert deploy.build_simready_env({}) == ({}, [])
+
+
+def test_collection_simready_env_wires_cache_and_categories() -> None:
+    deploy = load_deploy_module()
+    config = _simready_config(
+        {
+            "enabled": True,
+            "release_tag": "v0.2.0",
+            "default_library_id": "simready-light",
+            "cache_dir": "/opt/content-agents-local/simready-cache",
+            "allowed_categories": ["Metal", " Plastic ", ""],
+            "split_archives_enabled": False,
+        }
+    )
+
+    env, errors = deploy.build_env(config)
+
+    assert errors == []
+    assert env["MA_SIMREADY_ENABLED"] == "true"
+    assert env["MA_SIMREADY_RELEASE_TAG"] == "v0.2.0"
+    assert env["MA_DEFAULT_LIBRARY_ID"] == "simready-light"
+    assert env["MA_SIMREADY_CACHE_DIR"] == deploy.SIMREADY_CONTAINER_CACHE_DIR
+    # The host path becomes the compose bind-mount source, not the container path.
+    assert (
+        env["COLLECTION_SIMREADY_CACHE_SOURCE"]
+        == "/opt/content-agents-local/simready-cache"
+    )
+    assert env["MA_SIMREADY_ALLOWED_CATEGORIES"] == "Metal,Plastic"
+    # Split archives are off by default and must stay absent rather than "false".
+    assert "MA_SIMREADY_SPLIT_ARCHIVES_ENABLED" not in env
+    # An unset manifest path must stay absent: an empty value is read as a real
+    # path by the service and breaks library resolution.
+    assert "MA_SIMREADY_MANIFEST_PATH" not in env
+
+
+def test_collection_simready_rejects_relative_cache_dir() -> None:
+    deploy = load_deploy_module()
+    config = _simready_config({"enabled": True, "cache_dir": "simready-cache"})
+
+    _env, errors = deploy.build_env(config)
+
+    assert any("simready.cache_dir must be an absolute host path" in e for e in errors)
+
+
+def test_collection_simready_rejects_malformed_categories() -> None:
+    deploy = load_deploy_module()
+    config = _simready_config({"enabled": True, "allowed_categories": {"Metal": True}})
+
+    _env, errors = deploy.build_env(config)
+
+    assert any("simready.allowed_categories" in e for e in errors)
+
+
+def test_collection_simready_skipped_when_material_agent_disabled() -> None:
+    deploy = load_deploy_module()
+    config = _simready_config({"enabled": True, "cache_dir": "not-absolute"})
+    config["agents"]["material"] = {"enabled": False}
+
+    env, errors = deploy.build_env(config)
+
+    assert "MA_SIMREADY_ENABLED" not in env
+    assert not any("simready" in e for e in errors)

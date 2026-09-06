@@ -23,6 +23,7 @@ from fastapi.responses import (
     Response,
     StreamingResponse,
 )
+from material_agent.simready import SIMREADY_CATEGORY_PREFIX
 from world_understanding.utils.artifacts import (
     OpenArtifactFile,
     is_pipeline_temp_path,
@@ -85,15 +86,41 @@ class _MaterialLibrary:
 
 
 class _MaterialsConfig:
-    def __init__(self, default_library_id: str, libraries: dict[str, _MaterialLibrary]):
+    """Stand-in for ServiceConfig covering the surface materials_router uses.
+
+    SimReady libraries are metadata-only views resolved by id rather than
+    discovered on disk, so the double keeps them in a separate list exactly as
+    the real config does.
+    """
+
+    def __init__(
+        self,
+        default_library_id: str,
+        libraries: dict[str, _MaterialLibrary],
+        simready_views: list[_MaterialLibrary] | None = None,
+    ):
         self.default_library_id = default_library_id
         self.material_libraries = libraries
+        self.simready_views = list(simready_views or [])
         self.materials = [
             {"name": "Fallback", "description": "fallback", "binding": "/Fallback"}
         ]
 
     def get_library(self, library_id: str) -> _MaterialLibrary | None:
         return self.material_libraries.get(library_id)
+
+    def simready_library_views(self) -> list[_MaterialLibrary]:
+        return list(self.simready_views)
+
+    def resolve_material_library(self, library_id: str) -> _MaterialLibrary | None:
+        for lib in self.simready_views:
+            if lib.id == library_id:
+                return lib
+        if library_id.startswith(SIMREADY_CATEGORY_PREFIX):
+            raise ValueError(
+                f"SimReady material library has no enabled entries: {library_id}"
+            )
+        return self.get_library(library_id)
 
 
 class _RemoteKindStore(LocalSessionStore):
@@ -180,6 +207,50 @@ async def test_materials_router_library_and_icon_paths(
 
     with pytest.raises(HTTPException) as exc_info:
         await materials_router.get_library_material_icon("missing", "Aluminum")
+    _expect_http(404, exc_info)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_materials_router_lists_and_resolves_simready_libraries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SimReady libraries are not on disk, so they need explicit enumeration."""
+    metals_id = f"{SIMREADY_CATEGORY_PREFIX}metals"
+    metals = _MaterialLibrary(
+        id=metals_id,
+        name="SimReady Metals",
+        entries=[{"name": "Brass", "description": "metal", "binding": "/Brass"}],
+        icons={},
+        base_dir="",
+    )
+    on_disk = _MaterialLibrary(
+        id="default",
+        name="Default",
+        entries=[{"name": "Aluminum", "description": "metal", "binding": "/Aluminum"}],
+        icons={},
+        base_dir="",
+    )
+    monkeypatch.setattr(
+        materials_router,
+        "config",
+        _MaterialsConfig("default", {"default": on_disk}, simready_views=[metals]),
+    )
+
+    libraries = await materials_router.list_libraries()
+    assert [lib["id"] for lib in libraries["libraries"]] == ["default", metals_id]
+    assert libraries["total"] == 2
+
+    payload = await materials_router.get_library_materials(metals_id)
+    assert payload["library_name"] == "SimReady Metals"
+    assert [item["name"] for item in payload["materials"]] == ["Brass"]
+
+    # An unusable SimReady id raises ValueError from the resolver rather than
+    # returning None, and the router has to turn that into a 404.
+    with pytest.raises(HTTPException) as exc_info:
+        await materials_router.get_library_materials(
+            f"{SIMREADY_CATEGORY_PREFIX}absent"
+        )
     _expect_http(404, exc_info)
 
 
