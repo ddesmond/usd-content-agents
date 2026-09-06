@@ -59,6 +59,17 @@ async def list_libraries():
             }
         )
 
+    # SimReady libraries are resolved lazily by ID rather than discovered on
+    # disk, so they must be enumerated explicitly to appear in the catalog.
+    for lib in config.simready_library_views():
+        libraries.append(
+            {
+                "id": lib.id,
+                "name": lib.name,
+                "material_count": len(lib.entries),
+            }
+        )
+
     # Sort: default first, then alphabetically
     libraries.sort(
         key=lambda x: (0 if x["id"] == config.default_library_id else 1, x["name"])
@@ -77,7 +88,10 @@ async def get_library_materials(library_id: str):
     Returns:
         List of materials with icon URLs
     """
-    lib = config.get_library(library_id)
+    try:
+        lib = config.resolve_material_library(library_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     if not lib:
         raise HTTPException(status_code=404, detail=f"Library not found: {library_id}")
 

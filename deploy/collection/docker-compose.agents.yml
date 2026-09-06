@@ -49,10 +49,18 @@ services:
       - MA_CLUSTER_EMBEDDING_API_KEY_ENV=${MA_CLUSTER_EMBEDDING_API_KEY_ENV:-}
       - MA_CLUSTER_EMBEDDING_MAX_WORKERS=${MA_CLUSTER_EMBEDDING_MAX_WORKERS:-4}
       - MA_CLUSTER_EMBEDDING_BATCH_SIZE=${MA_CLUSTER_EMBEDDING_BATCH_SIZE:-50}
+      # MA_SIMREADY_* are intentionally not listed here. They come from
+      # .collection.generated.env so that unset optional values (notably
+      # MA_SIMREADY_MANIFEST_PATH) stay absent instead of becoming empty
+      # strings, which the service would treat as a real path.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - material-session-storage:/var/material-agent/sessions
+      # Defaults to a named volume. deploy.py sets this to a host directory
+      # when simready.cache_dir is configured, turning it into a bind mount so
+      # pre-staged SimReady release archives survive redeploys.
+      - ${COLLECTION_SIMREADY_CACHE_SOURCE:-material-simready-cache}:/var/material-agent/simready-cache
     restart: unless-stopped
     logging:
       driver: json-file
@@ -186,6 +194,8 @@ services:
 
 volumes:
   material-session-storage:
+    driver: local
+  material-simready-cache:
     driver: local
   physics-session-storage:
     driver: local

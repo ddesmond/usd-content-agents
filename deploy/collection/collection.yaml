@@ -75,6 +75,36 @@ runtime:
     texture: 4
   render_concurrency: 1
 
+simready:
+  # NVIDIA SimReady MDL material libraries (PhysicalAI-SimReady-Materials).
+  # These are the only MDL-native libraries the Material Agent ships support
+  # for; the bundled default library is OpenPBR/MaterialX only and cannot
+  # satisfy material_profile=omnipbr_mdl.
+  #
+  # Library IDs: "simready-light" and "simready-category:<Category>".
+  # The manifest (URLs + SHA-256 per category archive) ships inside the
+  # material_agent package, so manifest_path is normally left unset.
+  #
+  # cache_dir is a HOST path, bind-mounted into the Material Agent container.
+  # Release archives are downloaded on first use and cached there; pre-stage
+  # them at <cache_dir>/NVIDIA-Omniverse__PhysicalAI-SimReady-Materials/
+  # <release_tag>/<Category>/archives/<Category>.zip to avoid multi-GB
+  # in-container downloads (the hydrator has a 300s per-archive timeout).
+  enabled: false
+  release_tag: v0.2.0
+  cache_dir: /opt/content-agents-local/simready-cache
+  # Omit allowed_categories to expose every non-split category in the manifest.
+  allowed_categories:
+    - Metal
+    - Plastic
+    - Paint
+    - Glass
+    - Concrete
+    - Ceramic
+  # Leather is a split archive (.z01 + .zip); multi-file hydration is not
+  # implemented, so leave this false.
+  split_archives_enabled: false
+
 brev:
   # Brev is optional. Use this section only when a user asks to self-host one
   # or more dependencies on Brev.

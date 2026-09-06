@@ -37,6 +37,10 @@ SCENE_OPTIMIZER_AGENT_SERVICES = {
     "material-agent-service",
     "physics-agent-service",
 }
+# Container-side mount point for the SimReady hydration cache. Matches the
+# ServiceConfig.simready_cache_dir default and the bind mount target in
+# docker-compose.agents.yml.
+SIMREADY_CONTAINER_CACHE_DIR = "/var/material-agent/simready-cache"
 BREV_ROLE_DEFAULTS = {
     "render": {
         "name": "content-render",
@@ -376,6 +380,69 @@ def build_env(config: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
             errors.append(
                 "dependencies.embeddings.endpoint is required after provisioning"
             )
+
+    simready_env, simready_errors = build_simready_env(config)
+    if is_enabled(material, True):
+        env.update(simready_env)
+        errors.extend(simready_errors)
+
+    return env, errors
+
+
+def build_simready_env(config: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+    """Build MA_SIMREADY_* env for the Material Agent SimReady libraries.
+
+    SimReady release archives are large, so the cache directory is bind-mounted
+    from the host. Archives are hydrated lazily by the Material Agent: it will
+    download them on first use, or reuse anything already staged under
+    ``<cache_dir>/<repo>/<release_tag>/<Category>/archives/<Category>.zip``.
+    """
+    simready = config.get("simready", {})
+    simready = simready if isinstance(simready, dict) else {}
+    env: dict[str, str] = {}
+    errors: list[str] = []
+
+    if not is_enabled(simready, False):
+        return env, errors
+
+    env["MA_SIMREADY_ENABLED"] = "true"
+    env["MA_SIMREADY_CACHE_DIR"] = SIMREADY_CONTAINER_CACHE_DIR
+
+    release_tag = str(simready.get("release_tag") or "").strip()
+    if release_tag:
+        env["MA_SIMREADY_RELEASE_TAG"] = release_tag
+
+    cache_dir = str(simready.get("cache_dir") or "").strip()
+    if cache_dir:
+        if not Path(cache_dir).is_absolute():
+            errors.append("simready.cache_dir must be an absolute host path")
+        else:
+            env["COLLECTION_SIMREADY_CACHE_SOURCE"] = cache_dir
+
+    manifest_path = str(simready.get("manifest_path") or "").strip()
+    if manifest_path:
+        # Only a path already visible inside the container is usable here. The
+        # manifest packaged with material_agent is used when this is unset.
+        env["MA_SIMREADY_MANIFEST_PATH"] = manifest_path
+
+    categories = simready.get("allowed_categories")
+    if isinstance(categories, str):
+        values = [item.strip() for item in categories.split(",")]
+    elif isinstance(categories, list):
+        values = [str(item).strip() for item in categories]
+    elif categories is None:
+        values = []
+    else:
+        errors.append("simready.allowed_categories must be a string or list")
+        values = []
+    values = [item for item in values if item]
+    if values:
+        env["MA_SIMREADY_ALLOWED_CATEGORIES"] = ",".join(values)
+
+    if is_enabled(simready.get("split_archives", {}), False) or bool(
+        simready.get("split_archives_enabled", False)
+    ):
+        env["MA_SIMREADY_SPLIT_ARCHIVES_ENABLED"] = "true"
 
     return env, errors
 

@@ -33,8 +33,11 @@ from material_agent.api.defaults import (
 )
 from material_agent.simready import (
     DEFAULT_SIMREADY_RELEASE_TAG,
+    SIMREADY_CATEGORY_PREFIX,
+    SIMREADY_LIGHT_ID,
     SimReadyCatalogError,
     build_material_entries,
+    category_names,
     is_simready_library_id,
     load_manifest,
 )
@@ -50,6 +53,10 @@ from world_understanding.utils.credentials import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Cache for metadata-only SimReady library views. Building these parses the
+# full SimReady manifest, which is far too slow to redo on every catalog read.
+_simready_library_views_cache: list["MaterialLibrary"] | None = None
 
 _LOCAL_RENDER_HOSTS = {
     "localhost",
@@ -615,6 +622,69 @@ class ServiceConfig(BaseSettings):
             icons={},
             base_dir="",
         )
+
+    def simready_library_views(self) -> list[MaterialLibrary]:
+        """Return metadata-only SimReady library views for catalog listings.
+
+        SimReady libraries are resolved lazily by ID and are not discovered on
+        disk, so the catalog endpoints would otherwise never mention them.
+        """
+        global _simready_library_views_cache
+
+        if not self.simready_enabled:
+            return []
+        if _simready_library_views_cache is not None:
+            return _simready_library_views_cache
+
+        views: list[MaterialLibrary] = []
+        try:
+            manifest = load_manifest(self.simready_manifest_path)
+            release_tag = str(manifest.get("release_tag") or "")
+            if release_tag != self.simready_release_tag:
+                raise SimReadyCatalogError(
+                    f"SimReady manifest release tag {release_tag!r} does not "
+                    f"match configured tag {self.simready_release_tag!r}"
+                )
+            allowed = self._simready_allowed_categories()
+            allowed_lower = (
+                None if allowed is None else {item.lower() for item in allowed}
+            )
+            library_ids = [SIMREADY_LIGHT_ID]
+            library_ids.extend(
+                f"{SIMREADY_CATEGORY_PREFIX}{category}"
+                for category in category_names(manifest)
+                if allowed_lower is None or category.lower() in allowed_lower
+            )
+            for library_id in library_ids:
+                try:
+                    entries = build_material_entries(
+                        manifest,
+                        library_id,
+                        allowed_categories=allowed,
+                        split_archives_enabled=self.simready_split_archives_enabled,
+                    )
+                except SimReadyCatalogError:
+                    continue
+                if not entries:
+                    continue
+                views.append(
+                    MaterialLibrary(
+                        id=library_id,
+                        name=_display_name_from_library_id(library_id),
+                        yaml_path=self.simready_manifest_path or "",
+                        library_path="",
+                        entries=entries,
+                        icons={},
+                        base_dir="",
+                    )
+                )
+        except (SimReadyCatalogError, OSError, yaml.YAMLError) as exc:
+            logger.warning("Failed to enumerate SimReady material libraries: %s", exc)
+            return []
+
+        logger.info("Enumerated %d SimReady material libraries", len(views))
+        _simready_library_views_cache = views
+        return views
 
     def _simready_allowed_categories(self) -> set[str] | None:
         """Return configured SimReady category allowlist, if any."""
