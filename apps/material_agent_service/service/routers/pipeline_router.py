@@ -3870,8 +3870,11 @@ async def create_pipeline(
         description="Generate a cluster HTML report when clustering runs",
     ),
     material_library: str = Form(
-        default="default",
-        description="Material library ID to use (default: 'default'). Ignored when materials_zip is provided.",
+        default="",
+        description=(
+            "Material library ID to use. Empty means the deployment's configured "
+            "default (MA_DEFAULT_LIBRARY_ID). Ignored when materials_zip is provided."
+        ),
     ),
     layer_only: str = Form(
         default="false",
@@ -4600,6 +4603,9 @@ async def create_pipeline(
                 len(session_materials_entries),
                 session_materials_library,
             )
+
+    if not material_library:
+        material_library = config.default_library_id
 
     if not has_custom_materials:
         try:

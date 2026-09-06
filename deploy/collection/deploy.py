@@ -408,6 +408,14 @@ def build_simready_env(config: dict[str, Any]) -> tuple[dict[str, str], list[str
     env["MA_SIMREADY_ENABLED"] = "true"
     env["MA_SIMREADY_CACHE_DIR"] = SIMREADY_CONTAINER_CACHE_DIR
 
+    # Which library a run uses when the caller names none. The bundled default
+    # library is parametric OpenPBR with essentially no texture maps, so a
+    # deployment with SimReady staged usually wants one of those instead:
+    # they carry real 2048px diffuse, normal, roughness and metalness maps.
+    default_library = str(simready.get("default_library_id") or "").strip()
+    if default_library:
+        env["MA_DEFAULT_LIBRARY_ID"] = default_library
+
     release_tag = str(simready.get("release_tag") or "").strip()
     if release_tag:
         env["MA_SIMREADY_RELEASE_TAG"] = release_tag
