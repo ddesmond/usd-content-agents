@@ -57,6 +57,33 @@ def _warn_asset_remap(listener: Any | None, message: str) -> None:
         logger.warning(message)
 
 
+def is_module_resolved_source_asset(attr_name: str, path_str: str, source_dir: Path) -> bool:
+    """Return True for a shader source asset the renderer resolves by name.
+
+    ``info:<context>:sourceAsset`` on a UsdShade shader is not necessarily a
+    file inside the material library. MDL modules such as ``OmniPBR.mdl`` are
+    resolved from the renderer's MDL search path, and RTX ships its own copy.
+    The generic remapper assumes every asset path is a file under the library
+    directory, which is true for textures and false for these. Rewriting or
+    clearing them produces a stage whose MDL path does not resolve, and the
+    breakage is invisible because RTX still finds the module by name.
+
+    Only treat it as module-resolved when no such file actually exists in the
+    library; a library that genuinely ships the module keeps normal remapping.
+    """
+    if not path_str or not attr_name.startswith("info:"):
+        return False
+    if not attr_name.endswith(":sourceAsset"):
+        return False
+    try:
+        candidate = Path(path_str)
+        if candidate.is_absolute():
+            return not candidate.is_file()
+        return not (source_dir / path_str).is_file()
+    except (OSError, ValueError):
+        return True
+
+
 def remap_single_asset_path(
     path_str: str,
     source_dir: Path,
@@ -120,6 +147,9 @@ def remap_asset_paths_in_prim(
         attr_spec = prim_spec.attributes[attr_name]
         value = attr_spec.default
         if isinstance(value, Sdf.AssetPath):
+            if is_module_resolved_source_asset(attr_name, value.path, source_dir):
+                # Leave it verbatim: the renderer resolves this by module name.
+                continue
             new_path = remap_single_asset_path(
                 value.path,
                 source_dir,
