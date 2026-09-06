@@ -30,6 +30,11 @@ services:
       - WU_OVRTX_DEFAULT_HDRI=${WU_OVRTX_DEFAULT_HDRI:-}
       - WU_OVRTX_DEFAULT_HDRI_INTENSITY=${WU_OVRTX_DEFAULT_HDRI_INTENSITY:-}
       - WU_OVRTX_DUMP_COMBINED=${WU_OVRTX_DUMP_COMBINED:-}
+    # OVRTX/Vulkan rendering needs far more shared memory than the 64 MB
+    # Docker default. Without this the render daemon dies mid-render
+    # ("OvRTX daemon died during render"), and only under real load:
+    # warm-up and /health still pass beforehand.
+    shm_size: ${OVRTX_SHM_SIZE:-8gb}
     volumes:
       - /tmp:/host_tmp
     security_opt:

@@ -1,6 +1,6 @@
 services:
   llm-vllm:
-    image: vllm/vllm-openai:${COLLECTION_VLLM_TAG:-v0.8.5.post1}
+    image: vllm/vllm-openai:${COLLECTION_VLLM_TAG:-v0.28.0}
     container_name: content-llm-vllm
     ports:
       - "${COLLECTION_LLM_PORT:-8017}:8000"

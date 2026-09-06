@@ -1,6 +1,6 @@
 services:
   vlm-vllm:
-    image: vllm/vllm-openai:${COLLECTION_VLLM_TAG:-v0.8.5.post1}
+    image: vllm/vllm-openai:${COLLECTION_VLLM_TAG:-v0.28.0}
     container_name: content-vlm-vllm
     runtime: ${COLLECTION_VLM_DOCKER_RUNTIME:-nvidia}
     ports:
@@ -27,7 +27,7 @@ services:
       - --max-num-seqs
       - ${COLLECTION_VLM_MAX_NUM_SEQS:-1}
       - --limit-mm-per-prompt
-      - image=${COLLECTION_VLM_LIMIT_IMAGES:-20}
+      - '{"image": ${COLLECTION_VLM_LIMIT_IMAGES:-20}}'
       - --trust-remote-code
       - --enforce-eager
     ipc: host
