@@ -37,6 +37,21 @@ services:
     shm_size: ${OVRTX_SHM_SIZE:-8gb}
     volumes:
       - /tmp:/host_tmp
+      # Extra MDL modules, mounted onto a search root the renderer already
+      # uses. OVRTX resolves ``info:mdl:sourceAsset`` off its own MDL search
+      # path, and ``bin/library/mdl/mdl`` is one of those roots -- it is where
+      # ``nvidia/core_definitions.mdl`` is found, which vMaterials imports.
+      # Dropping an installed vMaterials_2 tree in beside it makes
+      # ``@vMaterials_2/Wood/Oak.mdl@`` resolve with no config change.
+      #
+      # A module the renderer cannot find does not error and does not render
+      # grey: RTX falls back to the material interface and silently drops every
+      # MDL-only parameter. Run deploy/probe-vmaterials-mdl.py after changing
+      # this, because nothing else will tell you it broke.
+      #
+      # Defaults to an empty directory so the service runs unchanged without
+      # vMaterials installed.
+      - ${OVRTX_VMATERIALS_DIR:-./empty-vmaterials}:/app/.ovrtx_venv/lib/python3.12/site-packages/ovrtx/bin/library/mdl/mdl/vMaterials_2:ro
     security_opt:
       - no-new-privileges:true
     cap_drop:
