@@ -199,6 +199,13 @@ class ServiceConfig(BaseSettings):
     material_libraries: dict[str, MaterialLibrary] = {}
     default_library_id: str = "default"
 
+    # Extra material libraries mounted from outside the image, using the same
+    # layout as the packaged materials/ directory: one subdirectory per library,
+    # each holding a materials.yaml and the USD library it names. A library
+    # built on the deployment (an MDL library, say) belongs here rather than
+    # baked into the image. Missing directory means no extra libraries.
+    material_libraries_dir: str = "/var/material-agent/material-libraries"
+
     # SimReady material libraries
     simready_enabled: bool = False
     simready_release_tag: str = DEFAULT_SIMREADY_RELEASE_TAG
@@ -442,20 +449,30 @@ class ServiceConfig(BaseSettings):
             )
 
     def _discover_libraries(self) -> dict[str, MaterialLibrary]:
-        """Scan materials/ directory for subdirectories containing materials.yaml.
+        """Scan the material library roots for subdirectories holding a materials.yaml.
+
+        The packaged materials/ directory is scanned first, then any extra root
+        mounted at ``material_libraries_dir``. A packaged library wins on an id
+        collision, so a stray mounted directory cannot shadow ``default``.
 
         Returns:
             Dict mapping library_id -> MaterialLibrary
         """
-        materials_root = Path(__file__).parent.parent / "materials"
+        packaged_root = Path(__file__).parent.parent / "materials"
+        if not packaged_root.is_dir():
+            logger.warning("Materials root not found: %s", packaged_root)
 
-        if not materials_root.is_dir():
-            logger.warning("Materials root not found: %s", materials_root)
-            return {}
+        roots = [packaged_root]
+        extra_root = Path(self.material_libraries_dir or "")
+        if str(extra_root) and extra_root.is_dir() and extra_root != packaged_root:
+            roots.append(extra_root)
 
         libraries: dict[str, MaterialLibrary] = {}
 
-        for subdir in sorted(materials_root.iterdir()):
+        for subdir in sorted(
+            (entry for root in roots if root.is_dir() for entry in root.iterdir()),
+            key=lambda entry: entry.name,
+        ):
             if not subdir.is_dir():
                 continue
 
@@ -464,6 +481,15 @@ class ServiceConfig(BaseSettings):
                 continue
 
             library_id = subdir.name
+            if library_id in libraries:
+                logger.warning(
+                    "Ignoring duplicate material library '%s' at %s: already "
+                    "loaded from %s",
+                    library_id,
+                    subdir,
+                    libraries[library_id].base_dir,
+                )
+                continue
 
             try:
                 with open(yaml_path, encoding="utf-8") as f:

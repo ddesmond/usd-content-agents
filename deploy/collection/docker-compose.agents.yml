@@ -64,6 +64,12 @@ services:
       # when simready.cache_dir is configured, turning it into a bind mount so
       # pre-staged SimReady release archives survive redeploys.
       - ${COLLECTION_SIMREADY_CACHE_SOURCE:-material-simready-cache}:/var/material-agent/simready-cache
+      # Extra material libraries built or staged on the host, in the same
+      # layout as the packaged materials/ directory. Defaults to a named volume
+      # so an unconfigured deployment simply finds it empty; deploy.py sets it
+      # to a host directory when material_libraries.dir is configured. Mounted
+      # read-only: the service only ever reads a library.
+      - ${COLLECTION_MATERIAL_LIBRARIES_SOURCE:-material-extra-libraries}:/var/material-agent/material-libraries:ro
     restart: unless-stopped
     logging:
       driver: json-file
@@ -205,6 +211,8 @@ volumes:
   material-session-storage:
     driver: local
   material-simready-cache:
+    driver: local
+  material-extra-libraries:
     driver: local
   physics-session-storage:
     driver: local

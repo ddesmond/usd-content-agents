@@ -388,6 +388,11 @@ def build_env(config: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
 
     env.update(build_session_storage_env(config))
 
+    library_env, library_errors = build_material_libraries_env(config)
+    if is_enabled(material, True):
+        env.update(library_env)
+        errors.extend(library_errors)
+
     return env, errors
 
 
@@ -411,6 +416,42 @@ def build_session_storage_env(config: dict[str, Any]) -> dict[str, str]:
         "COLLECTION_PHYSICS_SESSIONS_SOURCE": f"{base}/physics-sessions",
         "COLLECTION_TEXTURE_SESSIONS_SOURCE": f"{base}/texture-sessions",
     }
+
+
+def build_material_libraries_env(
+    config: dict[str, Any],
+) -> tuple[dict[str, str], list[str]]:
+    """Bind-mount extra Material Agent material libraries from the host.
+
+    The service scans a second library root at a fixed container path, using
+    the same layout as its packaged ``materials/`` directory: one subdirectory
+    per library, each with a ``materials.yaml``. A library authored on the
+    deployment belongs on the host rather than baked into the image, so it
+    survives an image rebuild and can be regenerated without one.
+
+    ``default_library_id`` is applied last so it wins over the SimReady block's
+    own setting, which is the only other place that emits it.
+    """
+    libraries = config.get("material_libraries", {})
+    libraries = libraries if isinstance(libraries, dict) else {}
+    env: dict[str, str] = {}
+    errors: list[str] = []
+
+    if not is_enabled(libraries, bool(libraries)):
+        return env, errors
+
+    directory = str(libraries.get("dir") or "").strip()
+    if directory:
+        if not Path(directory).is_absolute():
+            errors.append("material_libraries.dir must be an absolute host path")
+        else:
+            env["COLLECTION_MATERIAL_LIBRARIES_SOURCE"] = directory
+
+    default_library = str(libraries.get("default_library_id") or "").strip()
+    if default_library:
+        env["MA_DEFAULT_LIBRARY_ID"] = default_library
+
+    return env, errors
 
 
 def build_simready_env(config: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
