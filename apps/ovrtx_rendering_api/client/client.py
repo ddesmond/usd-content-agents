@@ -17,11 +17,31 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import pathlib
 import sys
+import tempfile
 from typing import Any
 
 import requests
+
+
+def _package_usd_as_usdz(source_path: pathlib.Path) -> pathlib.Path:
+    """Bundle a stage and its file references into a single ``.usdz``.
+
+    The data: URI below carries exactly one payload, so a stage that
+    references textures as separate files loses every one of them unless
+    they travel inside the same archive.
+    """
+    from pxr import UsdUtils
+
+    fd, usdz_name = tempfile.mkstemp(suffix=".usdz")
+    os.close(fd)
+    usdz_path = pathlib.Path(usdz_name)
+    if not UsdUtils.CreateNewUsdzPackage(str(source_path), str(usdz_path)):
+        usdz_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Failed to create USDZ package from: {source_path}")
+    return usdz_path
 
 
 def _encode_usd_as_data_uri(path: pathlib.Path) -> str:
@@ -60,19 +80,23 @@ def health_check(base_url: str, token: str | None, timeout: float) -> None:
 def render_smoke(
     base_url: str, usd_path: pathlib.Path, token: str | None, timeout: float
 ) -> None:
-    data_uri = _encode_usd_as_data_uri(usd_path)
-    payload = _build_request(data_uri)
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    headers["Content-Type"] = "application/json"
+    usdz_path = _package_usd_as_usdz(usd_path)
+    try:
+        data_uri = _encode_usd_as_data_uri(usdz_path)
+        payload = _build_request(data_uri)
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        headers["Content-Type"] = "application/json"
 
-    print(f"POST /render with {usd_path.name} ({usd_path.stat().st_size} bytes)")
-    r = requests.post(
-        f"{base_url.rstrip('/')}/render",
-        data=json.dumps(payload),
-        headers=headers,
-        timeout=timeout,
-    )
-    r.raise_for_status()
+        print(f"POST /render with {usd_path.name} ({usd_path.stat().st_size} bytes)")
+        r = requests.post(
+            f"{base_url.rstrip('/')}/render",
+            data=json.dumps(payload),
+            headers=headers,
+            timeout=timeout,
+        )
+        r.raise_for_status()
+    finally:
+        usdz_path.unlink(missing_ok=True)
     body = r.json()
     status = body.get("status", "unknown")
     error = body.get("error")

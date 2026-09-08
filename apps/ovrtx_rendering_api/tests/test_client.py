@@ -6,6 +6,7 @@ import base64
 import importlib.util
 import json
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,36 @@ def test_encode_usd_as_data_uri(tmp_path: Path) -> None:
     prefix, encoded = data_uri.split(",", 1)
     assert prefix == "data:application/octet-stream;base64"
     assert base64.b64decode(encoded) == b"#usda 1.0\n"
+
+
+def test_package_usd_as_usdz_bundles_referenced_texture(tmp_path: Path) -> None:
+    """A stage that references a separate texture file must travel with it.
+
+    Base64-encoding the bare stage only carries the ``.usda`` bytes — the
+    texture referenced by a relative asset path never reaches the renderer.
+    Packaging into a ``.usdz`` first bundles both into one archive.
+    """
+    pytest.importorskip("pxr")
+    client = _load_client_module()
+
+    texture = tmp_path / "albedo.png"
+    texture.write_bytes(b"\x89PNG\r\n\x1a\nfake-texture-bytes")
+    usd = tmp_path / "scene.usda"
+    usd.write_text(
+        '#usda 1.0\n'
+        'def Shader "Texture" {\n'
+        '    uniform asset inputs:file = @albedo.png@\n'
+        '}\n'
+    )
+
+    usdz_path = client._package_usd_as_usdz(usd)
+    try:
+        assert usdz_path.suffix == ".usdz"
+        with zipfile.ZipFile(usdz_path) as zf:
+            names = zf.namelist()
+        assert any(name.endswith("albedo.png") for name in names)
+    finally:
+        usdz_path.unlink(missing_ok=True)
 
 
 def test_build_request_uses_expected_smoke_defaults() -> None:
@@ -108,6 +139,7 @@ def test_render_smoke_posts_json_and_counts_images(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    pytest.importorskip("pxr")
     client = _load_client_module()
     usd = tmp_path / "scene.usda"
     usd.write_bytes(b"#usda 1.0\n")
@@ -162,6 +194,7 @@ def test_render_smoke_exits_on_bad_render_response(
     payload: dict,
     message: str,
 ) -> None:
+    pytest.importorskip("pxr")
     client = _load_client_module()
     usd = tmp_path / "scene.usda"
     usd.write_bytes(b"#usda 1.0\n")
@@ -207,6 +240,8 @@ def test_main_runs_health_and_render_checks(
     usd = tmp_path / "scene.usda"
     usd.write_text("#usda 1.0\n", encoding="utf-8")
     calls: list[tuple] = []
+    # health_check and render_smoke are stubbed below, so this test never
+    # touches _package_usd_as_usdz and does not require pxr.
 
     monkeypatch.setattr(
         client.sys,
