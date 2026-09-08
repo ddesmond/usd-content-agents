@@ -605,6 +605,28 @@ def test_render_recovery_is_single_flight(monkeypatch):
     assert renderer.render_calls == 2
 
 
+def test_render_rejects_oversized_request_before_decoding_it(monkeypatch):
+    from starlette.testclient import TestClient
+
+    monkeypatch.setenv(service_main._MAX_REQUEST_BYTES_ENV, "10")
+    renderer = _FakeRenderer(initialized=True, daemon_running=True)
+    monkeypatch.setattr(service_main, "_dispatcher", None)
+    monkeypatch.setattr(service_main, "_renderer", renderer)
+    monkeypatch.setattr(service_main, "_warmup_task", _FakeTask(done_result=True))
+
+    client = TestClient(service_main.app)
+    response = client.post(
+        "/render",
+        json={"url": "data:application/octet-stream;base64,AA=="},
+    )
+
+    assert response.status_code == 413
+    body = response.json()
+    assert "10" in body["error"]
+    assert "byte" in body["error"]
+    assert renderer.render_calls == 0
+
+
 def test_render_rejects_when_recovery_cannot_initialize_renderer(monkeypatch):
     renderer = _FakeRenderer(
         initialized=False,

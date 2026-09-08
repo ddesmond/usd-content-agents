@@ -23,6 +23,7 @@ from material_agent.api import (
     arun_scene_pipeline,
 )
 from material_agent.config.schema import STEP_ORDER
+from material_agent.tasks.apply_materials_to_usd import package_self_contained_usdz
 from world_understanding.agentic.config import clone_config_containers
 from world_understanding.telemetry import get_current_span, traced
 from world_understanding.telemetry.attributes import MAAttributes
@@ -2026,6 +2027,19 @@ async def _mirror_scene_outputs(
             "output/scene_with_materials_flat.usd",
             content_type="application/octet-stream",
         )
+        # Flatten() resolves composition arcs only; it leaves texture paths
+        # anchored to the working directory this run reaps, so the scene path
+        # needs the same portable package the single-asset apply step already
+        # produces via CreateNewUsdzPackage.
+        packaged_usdz_path = package_self_contained_usdz(Path(result.output_usd_path))
+        if packaged_usdz_path is not None:
+            await _mirror_scene_artifact(
+                session_manager,
+                session_id,
+                str(packaged_usdz_path),
+                "output/scene_with_materials.usdz",
+                content_type="application/octet-stream",
+            )
     await _mirror_scene_artifact(
         session_manager,
         session_id,

@@ -9,6 +9,7 @@ import inspect
 import io
 import json
 import logging
+import shutil
 import sys
 import types
 import zipfile
@@ -4192,6 +4193,69 @@ async def test_storage_failure_diagnostics_do_not_log_backend_values(
         )
     assert "missing-parent" not in caplog.text
     assert "code=event_log_persistence_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mirror_scene_outputs_packages_a_resolvable_usdz(
+    tmp_path: Path,
+) -> None:
+    """A large-scene run must survive its session directory being reaped.
+
+    ``scene_with_materials.usd`` and its flattened sibling both carry
+    package-relative texture paths that only resolve inside the working
+    directory this test deletes; only the packaged .usdz travels with its
+    textures.
+    """
+    from pxr import Sdf, Usd, UsdShade
+
+    working_dir = tmp_path / "working"
+    working_dir.mkdir()
+    package_path = working_dir / "source.usdz"
+    with zipfile.ZipFile(package_path, "w") as archive:
+        archive.writestr("0/tex.png", b"fake-png-bytes")
+
+    output_usd = working_dir / "scene_with_materials.usd"
+    stage = Usd.Stage.CreateNew(str(output_usd))
+    shader = UsdShade.Shader.Define(stage, "/Looks/Mat/Texture")
+    shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(
+        Sdf.AssetPath(f"{package_path}[0/tex.png]")
+    )
+    stage.GetRootLayer().Save()
+
+    flat = working_dir / "composed_scene_flat.usd"
+    flat.write_text("#usda 1.0\n")
+    manifest = working_dir / "manifest.json"
+    manifest.write_text("{}")
+
+    manager = SessionManager(tmp_path / "sessions")
+    sid = str(uuid4())
+    await manager.create_session(sid)
+    result = SimpleNamespace(
+        output_usd_path=str(output_usd),
+        manifest_path=str(manifest),
+        rendered_images=[],
+    )
+    await executor._mirror_scene_outputs(
+        manager,
+        sid,
+        result,
+        validation_report_path=None,
+        scene_predictions_path=None,
+    )
+
+    assert await manager.store.exists(sid, "output/scene_with_materials.usdz")
+
+    portable_dir = tmp_path / "elsewhere"
+    portable_dir.mkdir()
+    mirrored_usdz = manager.get_session_dir(sid) / "output" / "scene_with_materials.usdz"
+    portable_usdz = portable_dir / "scene_with_materials.usdz"
+    shutil.copy(mirrored_usdz, portable_usdz)
+    shutil.rmtree(working_dir)
+
+    reopened = Usd.Stage.Open(str(portable_usdz))
+    assert reopened is not None
+    attr = reopened.GetAttributeAtPath("/Looks/Mat/Texture.inputs:file")
+    assert attr.Get().resolvedPath
 
 
 @pytest.mark.asyncio

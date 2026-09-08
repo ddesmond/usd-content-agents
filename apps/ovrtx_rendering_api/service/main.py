@@ -16,7 +16,8 @@ import sys
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from service.dispatcher import OVRTXDispatcher, parse_gpu_workers
 from service.models import HealthResponse, RenderRequest
@@ -25,6 +26,15 @@ from service.renderer import Renderer
 _renderer: Renderer | None = None
 _warmup_task: asyncio.Task | None = None
 _dispatcher: OVRTXDispatcher | None = None
+
+# Container-to-container calls from the material agent skip nginx's
+# ``client_max_body_size``, so this is the only ceiling on the base64 request
+# body before OVRTX_ZIP_MAX_UNCOMPRESSED_BYTES applies -- and that one only
+# fires after the payload is already decoded in memory. Measured: a packaged
+# single-asset request base64-encodes to ~78 MB; 512 MiB leaves headroom for
+# multi-texture 4K/8K scenes while still failing well short of an OOM.
+_MAX_REQUEST_BYTES_ENV = "OVRTX_MAX_REQUEST_BYTES"
+_DEFAULT_MAX_REQUEST_BYTES = 512 * 1024 * 1024
 
 
 def _configure_logging(root_logger: logging.Logger | None = None) -> None:
@@ -169,6 +179,35 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def _limit_request_body_size(request: Request, call_next):
+    """Reject an oversized request by its Content-Length before it is read.
+
+    Rejecting here avoids buffering the body into memory at all, unlike a
+    check performed after FastAPI/pydantic have already decoded it.
+    """
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            size = int(content_length)
+        except ValueError:
+            size = None
+        limit = int(os.environ.get(_MAX_REQUEST_BYTES_ENV, _DEFAULT_MAX_REQUEST_BYTES))
+        if size is not None and size > limit:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "status": "exception",
+                    "error": (
+                        f"Request body of {size} bytes exceeds the "
+                        f"{limit}-byte limit ({_MAX_REQUEST_BYTES_ENV})"
+                    ),
+                    "images": {},
+                },
+            )
+    return await call_next(request)
 
 
 @app.get("/health")

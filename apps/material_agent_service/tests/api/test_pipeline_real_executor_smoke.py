@@ -10,7 +10,9 @@ heavy pipeline dependencies.
 
 import asyncio
 import json
+import zipfile
 from collections.abc import Generator
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -810,7 +812,11 @@ async def test_large_scene_pipeline_uses_real_executor_with_mocked_scene_api(
 
     output_r = await client.get(f"/artifacts/{session_id}/output")
     assert output_r.status_code == 200
-    assert output_r.content == b"#usda 1.0\n# flattened scene\n"
+    # The download now prefers the packaged .usdz over the flattened .usd:
+    # flattening only resolves composition arcs, so the flattened file still
+    # points at textures inside the working directory this run reaps.
+    with zipfile.ZipFile(BytesIO(output_r.content)) as archive:
+        assert "scene_with_materials.usd" in archive.namelist()
     final_render_r = await client.get(f"/artifacts/{session_id}/final-render")
     assert final_render_r.status_code == 200
     assert final_render_r.content == b"\x89PNG\r\n\x1a\nscene-render"
