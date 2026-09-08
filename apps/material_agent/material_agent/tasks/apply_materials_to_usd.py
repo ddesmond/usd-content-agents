@@ -6,10 +6,11 @@ import json
 import logging
 import os
 import traceback
+import zipfile
 from pathlib import Path
 from typing import Any
 
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, UsdUtils, Vt
 from world_understanding.agentic.events import get_listener
 from world_understanding.agentic.tasks import Task
 from world_understanding.utils.usd.asset_paths import (
@@ -50,6 +51,15 @@ from material_agent.materials import (
 logger = logging.getLogger(__name__)
 
 
+def _prim_has_authored_material_binding(prim: Usd.Prim) -> bool:
+    """Return whether a prim already carries a direct material binding."""
+    binding_api = UsdShade.MaterialBindingAPI(prim)
+    if not binding_api:
+        return False
+    rel = binding_api.GetDirectBindingRel()
+    return bool(rel and rel.GetTargets())
+
+
 def _warn_asset_remap(listener: Any | None, message: str) -> None:
     if listener is not None:
         listener.warning(message)
@@ -84,6 +94,143 @@ def is_module_resolved_source_asset(
         return not (source_dir / path_str).is_file()
     except (OSError, ValueError):
         return True
+
+
+def rewrite_dangling_package_relative_asset_paths(
+    usd_path: Path,
+    package_path: Path,
+    listener: Any | None = None,
+) -> int:
+    """Rewrite asset paths orphaned by copying a stage out of its source .usdz.
+
+    A texture path such as ``0/tex.png`` only resolves relative to the
+    package it was authored inside. A stage-copying step (``optimize_usd``)
+    carries that path over verbatim when it writes a loose copy elsewhere, so
+    the same relative path silently resolves to nothing there — the mesh
+    keeps its material binding but loses its texture. Any such path that is
+    genuinely a member of the source package is rewritten to the portable
+    ``<package>[<member>]`` form; anything else is left untouched.
+    """
+    try:
+        with zipfile.ZipFile(package_path) as archive:
+            package_members = set(archive.namelist())
+    except (OSError, zipfile.BadZipFile):
+        return 0
+    if not package_members:
+        return 0
+
+    layer = Sdf.Layer.FindOrOpen(str(usd_path))
+    if layer is None:
+        return 0
+
+    usd_dir = usd_path.resolve().parent
+    rewritten = 0
+    for root_spec in layer.rootPrims:
+        rewritten += _rewrite_package_relative_asset_paths_in_prim(
+            layer,
+            root_spec.path,
+            usd_dir,
+            package_path,
+            package_members,
+            listener,
+        )
+    if rewritten:
+        layer.Save()
+    return rewritten
+
+
+def _rewrite_package_relative_asset_paths_in_prim(
+    layer: Sdf.Layer,
+    prim_path: Sdf.Path,
+    usd_dir: Path,
+    package_path: Path,
+    package_members: set[str],
+    listener: Any | None,
+) -> int:
+    prim_spec = layer.GetPrimAtPath(prim_path)
+    if not prim_spec:
+        return 0
+
+    def rewritten_path(path_str: str) -> str | None:
+        if not path_str or is_uri_asset_path(path_str) or is_absolute_asset_path(
+            path_str
+        ):
+            return None
+        normalized = path_str.replace("\\", "/")
+        if (usd_dir / normalized).is_file():
+            return None
+        if normalized not in package_members:
+            return None
+        return f"{package_path}[{normalized}]"
+
+    rewritten = 0
+    for attr_name in list(prim_spec.attributes.keys()):
+        attr_spec = prim_spec.attributes[attr_name]
+        value = attr_spec.default
+        if isinstance(value, Sdf.AssetPath):
+            new_path = rewritten_path(value.path)
+            if new_path is not None:
+                _warn_asset_remap(
+                    listener,
+                    "Rewriting package-relative asset path that no longer "
+                    f"resolves outside its source package: {value.path} -> {new_path}",
+                )
+                attr_spec.default = Sdf.AssetPath(new_path)
+                rewritten += 1
+        elif isinstance(value, Sdf.AssetPathArray):
+            items = list(value)
+            changed = False
+            for index, asset_path in enumerate(items):
+                new_path = rewritten_path(asset_path.path)
+                if new_path is not None:
+                    items[index] = Sdf.AssetPath(new_path)
+                    changed = True
+                    rewritten += 1
+            if changed:
+                attr_spec.default = Sdf.AssetPathArray(items)
+
+    for child_spec in prim_spec.nameChildren:
+        rewritten += _rewrite_package_relative_asset_paths_in_prim(
+            layer,
+            prim_path.AppendChild(child_spec.name),
+            usd_dir,
+            package_path,
+            package_members,
+            listener,
+        )
+
+    return rewritten
+
+
+def package_self_contained_usdz(
+    usd_path: Path,
+    listener: Any | None = None,
+) -> Path | None:
+    """Bundle a stage and its resolved dependencies into a portable .usdz.
+
+    ``Usd.Stage.Flatten()`` only resolves composition arcs (references,
+    sublayers); it leaves asset-valued attributes such as texture paths
+    exactly as authored. An output whose textures are package-relative
+    (``scene.usdz[0/tex.png]``) or otherwise point back into the session's
+    input directory stays dangling after flattening, and stays dangling once
+    that session directory is deleted. ``CreateNewUsdzPackage`` walks the
+    stage's actual dependency graph and copies every resolved asset into the
+    archive, which flattening cannot do.
+    """
+    usdz_path = usd_path.with_suffix(".usdz")
+    try:
+        packaged = UsdUtils.CreateNewUsdzPackage(str(usd_path), str(usdz_path))
+    except Exception as e:
+        _warn_asset_remap(
+            listener, f"Failed to package self-contained usdz for {usd_path}: {e}"
+        )
+        return None
+    if not packaged:
+        _warn_asset_remap(
+            listener, f"Failed to package self-contained usdz for {usd_path}"
+        )
+        return None
+    return usdz_path
 
 
 def remap_single_asset_path(
@@ -244,6 +391,10 @@ class ApplyMaterialsToUSDTask(Task):
         - output_usd_path: Path where the USD file was saved
         - materials_applied: Dictionary of materials that were applied
         - assignment_stats: Statistics about material assignments
+        - packaged_output_usdz_path: Path to a self-contained .usdz package
+                                     bundling output_usd_path with its
+                                     resolved dependencies, or None if
+                                     packaging was skipped or failed
     """
 
     def __init__(self):
@@ -1817,6 +1968,19 @@ class ApplyMaterialsToUSDTask(Task):
                 )
             raise
 
+        packaged_usdz_path: Path | None = None
+        if not layer_only and context.get("package_output_usdz", True):
+            packaged_usdz_path = package_self_contained_usdz(
+                Path(output_usd_path), listener
+            )
+            if packaged_usdz_path:
+                self.listener.info(
+                    f"Packaged self-contained usdz: {packaged_usdz_path}"
+                )
+        context["packaged_output_usdz_path"] = (
+            str(packaged_usdz_path) if packaged_usdz_path else None
+        )
+
         # Calculate statistics
         assignment_stats = {
             "total_prims": prims_with_materials,
@@ -1906,6 +2070,16 @@ class ApplyMaterialsToUSDTask(Task):
             if not material_prim_path:
                 self.listener.warning(
                     f"Material '{master_material}' not available for instance {prim_path}"
+                )
+                instances_skipped += 1
+                continue
+
+            if is_fallback_material_name(
+                master_material
+            ) and _prim_has_authored_material_binding(prim):
+                self.listener.info(
+                    f"No actionable material found for instance {prim_path}; "
+                    "leaving its authored binding intact"
                 )
                 instances_skipped += 1
                 continue
@@ -3078,6 +3252,18 @@ class ApplyMaterialsToUSDTask(Task):
                 )
                 continue
 
+            # A prim the VLM could not identify keeps whatever material it
+            # already had rather than being overwritten with the neutral
+            # gray fallback, which would destroy real authored data.
+            if is_fallback_material_name(
+                material_name
+            ) and _prim_has_authored_material_binding(prim):
+                self.listener.info(
+                    "No actionable material found for "
+                    f"{source_description}; leaving its authored binding intact"
+                )
+                continue
+
             # Nullify existing material bindings and display colors
             try:
                 nullify_material(prim)
@@ -3427,6 +3613,20 @@ class ApplyMaterialsToUSDTask(Task):
             was_remapped,
         ) in grouped_assignments:
             source_description = ", ".join(source_prim_paths)
+
+            # A prim the VLM could not identify keeps whatever material it
+            # already had rather than being overwritten with the neutral
+            # gray fallback, which would destroy real authored data.
+            existing_prim = stage.GetPrimAtPath(binding_target_path)
+            if is_fallback_material_name(material_name) and (
+                existing_prim.IsValid()
+                and _prim_has_authored_material_binding(existing_prim)
+            ):
+                self.listener.info(
+                    "No actionable material found for "
+                    f"{source_description}; leaving its authored binding intact"
+                )
+                continue
 
             if material_profile == "display_color":
                 self._author_display_color_on_prim_spec(

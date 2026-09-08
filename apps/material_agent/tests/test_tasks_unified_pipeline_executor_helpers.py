@@ -263,6 +263,47 @@ def test_make_yaml_safe_rejects_recursive_containers_value_free() -> None:
         _make_yaml_safe({"recursive": recursive})
 
 
+def test_fix_dangling_optimized_asset_paths_rewrites_package_relative_texture(
+    tmp_path: Path,
+) -> None:
+    """optimize_usd output must keep working once it leaves the source .usdz."""
+    import zipfile
+
+    from pxr import Sdf, Usd, UsdShade
+
+    package_path = tmp_path / "scene.usdz"
+    with zipfile.ZipFile(package_path, "w") as archive:
+        archive.writestr("0/tex.png", b"fake-png-bytes")
+
+    optimized_usd = tmp_path / "cache" / "optimized" / "optimized_input.usd"
+    optimized_usd.parent.mkdir(parents=True)
+    stage = Usd.Stage.CreateNew(str(optimized_usd))
+    shader = UsdShade.Shader.Define(stage, "/Looks/Mat/Texture")
+    shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(
+        Sdf.AssetPath("0/tex.png")
+    )
+    stage.GetRootLayer().Save()
+
+    context = {"input_usd_path": str(package_path)}
+    outputs = {"optimized_usd_path": str(optimized_usd)}
+
+    UnifiedPipelineExecutorTask._fix_dangling_optimized_asset_paths(outputs, context)
+
+    reopened = Sdf.Layer.FindOrOpen(str(optimized_usd))
+    attr = reopened.GetAttributeAtPath("/Looks/Mat/Texture.inputs:file")
+    assert attr.default.path == f"{package_path}[0/tex.png]"
+
+
+def test_fix_dangling_optimized_asset_paths_skips_non_usdz_input(
+    tmp_path: Path,
+) -> None:
+    context = {"input_usd_path": str(tmp_path / "scene.usd")}
+    outputs = {"optimized_usd_path": str(tmp_path / "optimized.usd")}
+
+    # Must not raise or attempt to open a non-existent optimized file.
+    UnifiedPipelineExecutorTask._fix_dangling_optimized_asset_paths(outputs, context)
+
+
 def test_executor_top_level_helper_branches(tmp_path: Path) -> None:
     event_listener = MagicMock()
     listener = MagicMock()

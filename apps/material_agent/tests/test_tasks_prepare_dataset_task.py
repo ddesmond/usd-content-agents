@@ -868,6 +868,70 @@ def test_prepare_dataset_task_builds_v02_dataset_entries(tmp_path: Path) -> None
     }
 
 
+def test_prepare_dataset_task_keeps_render_metadata_paired_with_its_path(
+    tmp_path: Path,
+) -> None:
+    """Sorting image paths must not detach them from their own render metadata.
+
+    Regression: sorting only the path list (while metadata stayed in generation
+    order) silently swapped a render's path with an unrelated render's
+    metadata whenever generation order and lexical order disagreed.
+    """
+    usd_dir = tmp_path / "usd_inputs"
+    dataset_dir = tmp_path / "prepared_dataset"
+    model_dir = _write_model_inputs(usd_dir, "MODEL_A")
+    _write_png(model_dir / "obj_posx_posy_posz_prim_only.png", "red")
+    _write_png(model_dir / "obj_posx_composition.png", "blue")
+
+    prim_data = {
+        "prim_path": "/Root/PartA",
+        "renders": [
+            {
+                "path": "obj_posx_posy_posz_prim_only.png",
+                "view": "posx_posy_posz",
+                "camera": "cam-a",
+                "render_mode": "prim_only",
+            },
+            {
+                "path": "obj_posx_composition.png",
+                "view": "posx",
+                "camera": "cam-b",
+                "render_mode": "composition",
+            },
+        ],
+    }
+    (model_dir / "prims.jsonl").write_text(
+        json.dumps(prim_data) + "\n", encoding="utf-8"
+    )
+
+    listener = MagicMock()
+    task = PrepareDatasetTask()
+    context = {
+        "usd_dir": usd_dir,
+        "dataset_path": dataset_dir,
+        "models": ["MODEL_A"],
+        "config": {
+            "materials_list": ["Steel"],
+            "include_ground_truth": False,
+        },
+    }
+
+    with patch(
+        "material_agent.tasks.prepare_dataset.get_listener", return_value=listener
+    ):
+        result = task.run(context)
+
+    images = result["dataset_entries"][0]["media"]["images"]
+    by_path = {img["path"].rsplit("/", 1)[-1]: img for img in images}
+    assert (
+        by_path["obj_posx_composition.png"]["metadata"]["render_mode"] == "composition"
+    )
+    assert (
+        by_path["obj_posx_posy_posz_prim_only.png"]["metadata"]["render_mode"]
+        == "prim_only"
+    )
+
+
 def test_prepare_dataset_task_preserves_exact_step_metadata_prompt(
     tmp_path: Path,
 ) -> None:

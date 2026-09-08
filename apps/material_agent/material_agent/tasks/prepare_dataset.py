@@ -1423,7 +1423,12 @@ class PrepareDatasetTask(Task):
                         image_paths = ref_paths + [p[0] for p in render_pairs]
                         image_metadata = ref_meta + [p[1] for p in render_pairs]
                     else:
-                        image_paths.sort()
+                        pairs = sorted(
+                            zip(image_paths, image_metadata, strict=False),
+                            key=lambda pair: pair[0],
+                        )
+                        image_paths = [pair[0] for pair in pairs]
+                        image_metadata = [pair[1] for pair in pairs]
 
                     if len(image_paths) == 0:
                         listener.warning(

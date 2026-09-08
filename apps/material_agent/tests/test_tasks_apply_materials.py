@@ -3,11 +3,13 @@
 """Tests for ApplyMaterialsToUSD task error handling and stage metadata."""
 
 import json
+import shutil
+import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
+from pxr import Ar, Gf, Sdf, Usd, UsdGeom, UsdShade
 
 import material_agent.tasks.apply_materials_to_usd as apply_module
 from material_agent.materials import FALLBACK_MATERIAL_NAME
@@ -3093,6 +3095,80 @@ class TestApplyMaterialsOutputIntegrity:
         assert child_shader.GetPrim().IsActive()
 
 
+class TestApplyMaterialsPreservesUnknownBindings:
+    """An unknown prediction must not clobber an already-authored binding."""
+
+    def _stage_with_bound_mesh(self, input_usd: Path) -> None:
+        stage = Usd.Stage.CreateNew(str(input_usd))
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
+        root = UsdGeom.Xform.Define(stage, "/Asset")
+        stage.SetDefaultPrim(root.GetPrim())
+        UsdGeom.Mesh.Define(stage, "/Asset/Mesh")
+        sand_material = UsdShade.Material.Define(stage, "/Asset/Looks/Sand")
+        shader = UsdShade.Shader.Define(stage, "/Asset/Looks/Sand/Shader")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        sand_material.CreateSurfaceOutput().ConnectToSource(
+            shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        )
+        UsdShade.MaterialBindingAPI.Apply(
+            stage.GetPrimAtPath("/Asset/Mesh")
+        ).Bind(sand_material)
+        stage.GetRootLayer().Save()
+
+    def test_full_stage_leaves_authored_binding_when_prediction_unknown(
+        self, tmp_path: Path
+    ):
+        input_usd = tmp_path / "input.usda"
+        output_usd = tmp_path / "output.usd"
+        self._stage_with_bound_mesh(input_usd)
+
+        task = ApplyMaterialsToUSDTask()
+        task.listener = MagicMock()
+
+        _, _, stats = task._create_full_stage(
+            input_usd_path=input_usd,
+            output_usd_path=output_usd,
+            resolved_materials={FALLBACK_MATERIAL_NAME: "unused"},
+            prim_to_material={"/Asset/Mesh": FALLBACK_MATERIAL_NAME},
+        )
+
+        out_stage = Usd.Stage.Open(str(output_usd))
+        bound = UsdShade.MaterialBindingAPI(
+            out_stage.GetPrimAtPath("/Asset/Mesh")
+        ).ComputeBoundMaterial()[0]
+        assert bound.GetPath() == Sdf.Path("/Asset/Looks/Sand")
+        assert "/Asset/Mesh" not in stats["bound_prim_ids"]
+        assert "/Asset/Mesh" in stats["unbound_prim_ids"]
+
+    def test_material_layer_leaves_authored_binding_when_prediction_unknown(
+        self, tmp_path: Path
+    ):
+        input_usd = tmp_path / "input.usda"
+        output_usd = tmp_path / "output.usd"
+        self._stage_with_bound_mesh(input_usd)
+
+        task = ApplyMaterialsToUSDTask()
+        task.listener = MagicMock()
+
+        result_stage, _, stats = task._create_material_layer(
+            input_usd_path=input_usd,
+            output_usd_path=output_usd,
+            resolved_materials={FALLBACK_MATERIAL_NAME: "unused"},
+            prim_to_material={"/Asset/Mesh": FALLBACK_MATERIAL_NAME},
+        )
+        # The caller (ApplyMaterialsToUSDTask.run) saves the returned stage;
+        # _create_material_layer itself only authors in-memory edits.
+        result_stage.Save()
+
+        out_stage = Usd.Stage.Open(str(output_usd))
+        bound = UsdShade.MaterialBindingAPI(
+            out_stage.GetPrimAtPath("/Asset/Mesh")
+        ).ComputeBoundMaterial()[0]
+        assert bound.GetPath() == Sdf.Path("/Asset/Looks/Sand")
+        assert "/Asset/Mesh" not in stats["bound_prim_ids"]
+        assert "/Asset/Mesh" in stats["unbound_prim_ids"]
+
+
 class TestApplyMaterialsHelperCoverage:
     def test_asset_path_remap_and_color_space_helpers(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -4451,3 +4527,129 @@ class TestModuleResolvedSourceAssets:
 
         assert module_attr.default.path == "OmniPBR.mdl"
         assert texture_attr.default.path == "../library/textures/a.png"
+
+
+class TestRewriteDanglingPackageRelativeAssetPaths:
+    """A path valid only inside its source .usdz must survive leaving it."""
+
+    def _make_package(self, tmp_path: Path) -> Path:
+        package_path = tmp_path / "scene.usdz"
+        with zipfile.ZipFile(package_path, "w") as archive:
+            archive.writestr("0/tex.png", b"fake-png-bytes")
+        return package_path
+
+    def test_rewrites_path_that_only_resolves_inside_the_package(
+        self, tmp_path: Path
+    ) -> None:
+        package_path = self._make_package(tmp_path)
+
+        optimized_dir = tmp_path / "cache" / "optimized"
+        optimized_dir.mkdir(parents=True)
+        optimized_usd = optimized_dir / "optimized_input.usd"
+        stage = Usd.Stage.CreateNew(str(optimized_usd))
+        shader = UsdShade.Shader.Define(stage, "/Looks/Mat/Texture")
+        shader.CreateInput(
+            "file", Sdf.ValueTypeNames.Asset
+        ).Set(Sdf.AssetPath("0/tex.png"))
+        stage.GetRootLayer().Save()
+
+        rewritten = apply_module.rewrite_dangling_package_relative_asset_paths(
+            optimized_usd, package_path
+        )
+
+        assert rewritten == 1
+        reopened = Sdf.Layer.FindOrOpen(str(optimized_usd))
+        attr = reopened.GetAttributeAtPath("/Looks/Mat/Texture.inputs:file")
+        assert attr.default.path == f"{package_path}[0/tex.png]"
+
+    def test_leaves_path_that_resolves_locally_untouched(self, tmp_path: Path) -> None:
+        package_path = self._make_package(tmp_path)
+
+        optimized_dir = tmp_path / "cache" / "optimized"
+        optimized_dir.mkdir(parents=True)
+        (optimized_dir / "tex.png").write_bytes(b"local-copy")
+        optimized_usd = optimized_dir / "optimized_input.usd"
+        stage = Usd.Stage.CreateNew(str(optimized_usd))
+        shader = UsdShade.Shader.Define(stage, "/Looks/Mat/Texture")
+        shader.CreateInput(
+            "file", Sdf.ValueTypeNames.Asset
+        ).Set(Sdf.AssetPath("tex.png"))
+        stage.GetRootLayer().Save()
+
+        rewritten = apply_module.rewrite_dangling_package_relative_asset_paths(
+            optimized_usd, package_path
+        )
+
+        assert rewritten == 0
+        reopened = Sdf.Layer.FindOrOpen(str(optimized_usd))
+        attr = reopened.GetAttributeAtPath("/Looks/Mat/Texture.inputs:file")
+        assert attr.default.path == "tex.png"
+
+    def test_leaves_path_absent_from_package_untouched(self, tmp_path: Path) -> None:
+        package_path = self._make_package(tmp_path)
+
+        optimized_dir = tmp_path / "cache" / "optimized"
+        optimized_dir.mkdir(parents=True)
+        optimized_usd = optimized_dir / "optimized_input.usd"
+        stage = Usd.Stage.CreateNew(str(optimized_usd))
+        shader = UsdShade.Shader.Define(stage, "/Looks/Mat/Texture")
+        shader.CreateInput(
+            "file", Sdf.ValueTypeNames.Asset
+        ).Set(Sdf.AssetPath("nonexistent/tex.png"))
+        stage.GetRootLayer().Save()
+
+        rewritten = apply_module.rewrite_dangling_package_relative_asset_paths(
+            optimized_usd, package_path
+        )
+
+        assert rewritten == 0
+        reopened = Sdf.Layer.FindOrOpen(str(optimized_usd))
+        attr = reopened.GetAttributeAtPath("/Looks/Mat/Texture.inputs:file")
+        assert attr.default.path == "nonexistent/tex.png"
+
+
+class TestPackageSelfContainedUsdz:
+    """A packaged download must open with every asset resolvable on its own."""
+
+    def test_packaged_usdz_resolves_after_source_session_is_deleted(
+        self, tmp_path: Path
+    ) -> None:
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        package_path = session_dir / "scene.usdz"
+        with zipfile.ZipFile(package_path, "w") as archive:
+            archive.writestr("0/tex.png", b"fake-png-bytes")
+
+        output_usd = session_dir / "scene_with_materials.usd"
+        stage = Usd.Stage.CreateNew(str(output_usd))
+        shader = UsdShade.Shader.Define(stage, "/Looks/Mat/Texture")
+        shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(
+            Sdf.AssetPath(f"{package_path}[0/tex.png]")
+        )
+        stage.GetRootLayer().Save()
+
+        usdz_path = apply_module.package_self_contained_usdz(output_usd)
+
+        assert usdz_path == output_usd.with_suffix(".usdz")
+        assert usdz_path.exists()
+
+        portable_dir = tmp_path / "elsewhere"
+        portable_dir.mkdir()
+        portable_usdz = portable_dir / usdz_path.name
+        shutil.copy(usdz_path, portable_usdz)
+        shutil.rmtree(session_dir)
+
+        reopened = Usd.Stage.Open(str(portable_usdz))
+        assert reopened is not None
+        attr = reopened.GetAttributeAtPath("/Looks/Mat/Texture.inputs:file")
+        resolved_path = attr.Get().resolvedPath
+        assert resolved_path
+
+        asset = Ar.GetResolver().OpenAsset(Ar.ResolvedPath(resolved_path))
+        assert asset is not None
+        assert asset.GetBuffer().decode() == "fake-png-bytes"
+
+    def test_returns_none_when_packaging_fails(self, tmp_path: Path) -> None:
+        missing_usd = tmp_path / "does_not_exist.usd"
+
+        assert apply_module.package_self_contained_usdz(missing_usd) is None

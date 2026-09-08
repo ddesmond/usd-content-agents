@@ -50,6 +50,9 @@ from material_agent.materials import (
     normalize_material_name,
 )
 from material_agent.prompt_security import format_material_names_for_prompt
+from material_agent.tasks.apply_materials_to_usd import (
+    rewrite_dangling_package_relative_asset_paths,
+)
 from material_agent.tasks.prepare_dataset import (
     render_system_prompt_from_prepare_config,
 )
@@ -428,6 +431,38 @@ class UnifiedPipelineExecutorTask(BasePipelineExecutor):
         return Path(working_dir) / ".pipeline_state.json"
 
     # ========== Material-Agent Specific Execution Logic ==========
+
+    @staticmethod
+    def _fix_dangling_optimized_asset_paths(
+        outputs: dict[str, Any] | None,
+        context: dict[str, Any],
+    ) -> None:
+        """Repair texture paths orphaned by optimize_usd leaving the source .usdz.
+
+        See ``rewrite_dangling_package_relative_asset_paths`` for why this is
+        needed: without it, a mesh optimized from a .usdz can go untextured
+        for reasons invisible downstream (grey preview renders, an __UNKNOWN__
+        material prediction, the fallback material overwriting the real one).
+        """
+        if not isinstance(outputs, dict):
+            return
+        optimized_usd_path = outputs.get("optimized_usd_path")
+        input_usd_path = context.get("input_usd_path")
+        if not optimized_usd_path or not input_usd_path:
+            return
+        package_path = Path(input_usd_path)
+        if package_path.suffix.lower() != ".usdz":
+            return
+        listener = context.get("event_listener")
+        rewritten = rewrite_dangling_package_relative_asset_paths(
+            Path(optimized_usd_path), package_path, listener
+        )
+        if rewritten:
+            logger.info(
+                "Rewrote %d dangling package-relative asset path(s) in %s",
+                rewritten,
+                optimized_usd_path,
+            )
 
     def _activate_generated_material_library(
         self,
@@ -2102,6 +2137,7 @@ class UnifiedPipelineExecutorTask(BasePipelineExecutor):
                 if step_name == "optimize_usd":
                     if outputs.get("original_prim_count") is not None:
                         context["original_prim_count"] = outputs["original_prim_count"]
+                    self._fix_dangling_optimized_asset_paths(outputs, context)
                 if step_name == "build_dataset_usd":
                     if outputs.get("num_prims") is not None:
                         context["num_prims"] = outputs["num_prims"]
@@ -2411,6 +2447,7 @@ class UnifiedPipelineExecutorTask(BasePipelineExecutor):
                 if step_name == "optimize_usd":
                     if outputs.get("original_prim_count") is not None:
                         context["original_prim_count"] = outputs["original_prim_count"]
+                    self._fix_dangling_optimized_asset_paths(outputs, context)
                 if step_name == "build_dataset_usd":
                     if outputs.get("num_prims") is not None:
                         context["num_prims"] = outputs["num_prims"]

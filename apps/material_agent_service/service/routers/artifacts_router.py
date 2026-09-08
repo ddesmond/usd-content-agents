@@ -47,6 +47,7 @@ CONTENT_TYPES = {
     ".usd": "application/octet-stream",
     ".usda": "text/plain",
     ".usdc": "application/octet-stream",
+    ".usdz": "model/vnd.usdz+zip",
     ".json": "application/json",
     ".jsonl": "application/x-ndjson",
     ".html": "text/html",
@@ -583,6 +584,23 @@ async def download_output_usd(session_id: str):
 
     metadata = await manager.get_session_metadata(session_id)
     session_dir = manager.get_session_dir(session_id)
+
+    # Prefer the packaged .usdz: flattening only resolves composition arcs, so
+    # a flattened .usd still carries texture paths anchored to the session
+    # directory and goes dangling once the session is reaped. The .usdz is
+    # produced by the apply step and stays valid regardless of whether render
+    # reran, so it is checked ahead of the flattened/non-flattened .usd files.
+    if artifact_is_valid(metadata, "applied_output_usd"):
+        response = await _try_serve_file_with_fallback(
+            manager,
+            session_id,
+            "output/scene_with_materials.usdz",
+            session_dir / "output" / "scene_with_materials.usdz",
+            filename="scene_with_materials.usdz",
+            artifact="applied_output_usd",
+        )
+        if response:
+            return response
 
     if artifact_is_valid(metadata, "rendered_output_usd"):
         # Try flattened version first.

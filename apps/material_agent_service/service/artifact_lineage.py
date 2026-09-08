@@ -86,7 +86,10 @@ ARTIFACT_CANONICAL_KEYS: dict[str, tuple[str, ...]] = {
     "raw_predictions": ("cache/predictions/predictions.jsonl",),
     "prediction_report": ("cache/predictions/prediction_report.html",),
     "restored_predictions": ("cache/restored/restored_predictions.jsonl",),
-    "applied_output_usd": ("output/scene_with_materials.usd",),
+    "applied_output_usd": (
+        "output/scene_with_materials.usd",
+        "output/scene_with_materials.usdz",
+    ),
     "rendered_output_usd": (
         "output/scene_with_materials_flat.usd",
         "output/composed_scene_flat.usd",
